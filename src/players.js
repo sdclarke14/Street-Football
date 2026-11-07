@@ -42,9 +42,9 @@ function makeRedVariant(map) {
 export async function loadPlayerAssets() {
   const loader = new GLTFLoader();
   const [base, turbo, regular] = await Promise.all([
-    loader.loadAsync('/models/hero_gassed_run.glb'),
-    loader.loadAsync('/models/hero_turbo_run.glb'),
-    loader.loadAsync('/models/hero_regular_run.glb'),
+    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_gassed_run.glb'),
+    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_turbo_run.glb'),
+    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_regular_run.glb'),
   ]);
 
   const bbox = new THREE.Box3().setFromObject(base.scene);

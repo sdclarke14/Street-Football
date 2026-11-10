@@ -1,12 +1,10 @@
 import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { createPostFX } from './postfx.js';
+import { setMaxAnisotropy } from './materials.js';
 import { StaminaMeter, TIERS } from './stamina.js';
 import { FIELD, buildField, buildLighting, createDriveLines } from './field.js';
 import { createBall, holdBall, throwBall, updateBall } from './ball.js';
-import { loadPlayerAssets, createPlayer, updatePlayerClip, aimBone } from './players.js';
+import { loadPlayerAssets, createPlayer, updatePlayerClip, updateFlags, aimBone } from './players.js';
 import { createPowerups } from './powerups.js';
 import { createFX } from './effects.js';
 
@@ -89,37 +87,34 @@ const CAM_SMOOTHING = 4;
 
 // Scene / renderer
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 300);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 2000);
+// Graphics quality: 'high' (desktop: AO, 4K shadows, MSAA x4) or 'low'
+// (phones). Override with ?gfx=low|high; press G to switch (reloads).
+const params = new URLSearchParams(location.search);
+const QUALITY = params.get('gfx') ?? (matchMedia('(pointer: coarse)').matches ? 'low' : 'high');
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY === 'high' ? 2 : 1.5));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 0.95;
+setMaxAnisotropy(renderer.capabilities.getMaxAnisotropy());
 document.querySelector('#app').appendChild(renderer.domElement);
 
-buildLighting(scene);
-// Cool rim/back light for edge pop on the cel-shaded players (no shadows).
-const rimLight = new THREE.DirectionalLight(0x9fd8ff, 0.5);
-rimLight.position.set(-25, 16, 28);
-scene.add(rimLight);
-
-buildField(scene);
+const lighting = buildLighting(scene, renderer, { quality: QUALITY });
+buildField(scene, { quality: QUALITY });
 const { losLine, markerLine } = createDriveLines(scene);
 const ball = createBall(scene);
 const powerups = createPowerups(scene);
 const fx = createFX(scene, camera);
 
-// Subtle bloom so the acid-yellow pickups/flashes pop; high threshold keeps
-// the rest of the golden-hour scene clean.
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
-const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.4, 0.3, 0.85
-);
-composer.addPass(bloomPass);
-composer.addPass(new OutputPass());
+const composer = createPostFX(renderer, scene, camera, QUALITY);
+window.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() !== 'g' || e.repeat) return;
+  params.set('gfx', QUALITY === 'high' ? 'low' : 'high');
+  location.search = params.toString();
+});
 
 // HUD
 const stamina = new StaminaMeter({ regularBelow: 60, gassedBelow: 25 });
@@ -935,7 +930,7 @@ loadPlayerAssets().then((assets) => {
       const p = createPlayer(assets, {
         team,
         color: TEAM_COLORS[team],
-        redJersey: team === TEAM.RED,
+        skinTone: slot + team * 3,
         iconLetter: team === TEAM.BLUE ? ICON_LETTERS[slot] ?? null : null,
       });
       p.slot = slot;
@@ -1075,6 +1070,7 @@ function step(dt) {
     const clipTier = p === controlled ? tier : p.turboT > 0 ? TIERS.TURBO : TIERS.REGULAR;
     updatePlayerClip(p, clipTier, p.stunT > 0 ? 0 : speed);
     p.mixer.update(dt);
+    updateFlags(p, speed, clock.elapsedTime);
 
     // procedural catch reach: arms track the incoming ball
     if (ball.state === 'thrown' && ball.intended === p) {
@@ -1121,6 +1117,7 @@ function step(dt) {
   camera.lookAt(camLook);
   camera.rotateZ(CAM_ROLL);
   fx.update(dt); // flashes + camera shake (after camera placement)
+  lighting.follow(bp);
 
   composer.render();
 }

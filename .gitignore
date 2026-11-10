@@ -2,3 +2,7 @@ node_modules
 dist
 .DS_Store
 *.local
+
+# Blender working files (rebuilt by tools/build_player.py)
+art/*.blend
+*.blend1

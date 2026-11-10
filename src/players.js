@@ -3,68 +3,35 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { TIERS } from './stamina.js';
 
-// All three GLBs share an identical 24-joint skeleton (verified), so the
-// turbo/regular clips bind by bone name onto clones of the base rig.
+import { teamMaterials, skinMaterial } from './materials.js';
+
+// Flag football player built by tools/build_player.py: one GLB with the
+// 24-joint rig, a ~27k-triangle body + clothing, and three run clips. Mesh
+// parts are keyed by material name so each team gets its own kit.
 const PLAYER_HEIGHT = 1.8;
 
-// The body texture is one baked atlas (not separable materials), but the
-// jersey green is chroma-distinct from skin/white/black — so the away kit is
-// made by swapping R/G on green-dominant pixels: green jersey -> red jersey,
-// everything else untouched.
-function makeRedVariant(map) {
-  const SIZE = 2048;
-  const canvas = document.createElement('canvas');
-  canvas.width = SIZE;
-  canvas.height = SIZE;
-  const g = canvas.getContext('2d');
-  g.drawImage(map.image, 0, 0, SIZE, SIZE);
-  const imageData = g.getImageData(0, 0, SIZE, SIZE);
-  const d = imageData.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const r = d[i];
-    const green = d[i + 1];
-    if (green > r * 1.15 && green > d[i + 2] * 1.05) {
-      d[i] = green;
-      d[i + 1] = r;
-    }
-  }
-  g.putImageData(imageData, 0, 0);
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.flipY = map.flipY;
-  tex.colorSpace = map.colorSpace;
-  tex.wrapS = map.wrapS;
-  tex.wrapT = map.wrapT;
-  tex.anisotropy = map.anisotropy;
-  return tex;
-}
+// Flag belt attachment points (model space, from the build script's belt fit).
+const BELT = { rx: 0.187, y: 0.872, zBack: -0.172, zSide: -0.024 };
+const FLAG_ANCHORS = [
+  { pos: [BELT.rx, BELT.y, BELT.zSide], yaw: Math.PI / 2 },
+  { pos: [-BELT.rx, BELT.y, BELT.zSide], yaw: Math.PI / 2 },
+  { pos: [0, BELT.y, BELT.zBack], yaw: 0 },
+];
 
 export async function loadPlayerAssets() {
-  const loader = new GLTFLoader();
-  const [base, turbo, regular] = await Promise.all([
-    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_gassed_run.glb'),
-    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_turbo_run.glb'),
-    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_regular_run.glb'),
-  ]);
-
-  const bbox = new THREE.Box3().setFromObject(base.scene);
+  const gltf = await new GLTFLoader().loadAsync(import.meta.env.BASE_URL + 'models/player_flag.glb');
+  const bbox = new THREE.Box3().setFromObject(gltf.scene);
   const size = bbox.getSize(new THREE.Vector3());
   const scale = PLAYER_HEIGHT / size.y;
-
-  let baseMap = null;
-  base.scene.traverse((c) => {
-    if (c.isMesh && c.material.map) baseMap = c.material.map;
-  });
-
+  const clip = (name) => gltf.animations.find((a) => a.name === name);
   return {
-    template: base.scene,
+    template: gltf.scene,
     scale,
     yOffset: -bbox.min.y * scale,
-    redMap: makeRedVariant(baseMap),
     clips: {
-      [TIERS.GASSED]: base.animations[0], // Lean_Forward_Sprint, played slow
-      [TIERS.TURBO]: turbo.animations[0],
-      [TIERS.REGULAR]: regular.animations[0],
+      [TIERS.GASSED]: clip('Run_Gassed'), // Lean_Forward_Sprint, played slow
+      [TIERS.TURBO]: clip('Run_Turbo'),
+      [TIERS.REGULAR]: clip('Run_Regular'),
     },
   };
 }
@@ -100,28 +67,44 @@ function makeTargetIcon(letter) {
   return sprite;
 }
 
-export function createPlayer(assets, { team, color, redJersey = false, iconLetter = null }) {
+export function createPlayer(assets, { team, color, skinTone = 0, iconLetter = null }) {
   const rig = cloneSkinned(assets.template);
-  if (redJersey) {
-    rig.traverse((c) => {
-      if (c.isMesh) {
-        c.material = c.material.clone();
-        // This asset carries its base look in BOTH map and emissiveMap
-        // (white emissive at intensity 1 — that's its cel-shaded look), so
-        // both slots must point at the recolored atlas.
-        c.material.map = assets.redMap;
-        c.material.emissiveMap = assets.redMap;
-      }
-    });
-  }
+  const kit = teamMaterials(team);
+  rig.traverse((c) => {
+    if (!c.isMesh) return;
+    const name = c.material.name;
+    c.material = name === 'Skin' ? skinMaterial(skinTone) : kit[name] ?? c.material;
+    c.castShadow = true;
+    c.receiveShadow = true;
+  });
   rig.scale.setScalar(assets.scale);
   rig.position.y = assets.yOffset;
-  rig.traverse((c) => {
-    if (c.isMesh) c.castShadow = true;
-  });
 
   const group = new THREE.Group();
   group.add(rig);
+
+  // Flags: anchors ride the Hips bone; the visible flag hangs from the anchor
+  // in player space so it can trail and flutter with speed.
+  const hips = rig.getObjectByName('Hips');
+  const flagGeo = new THREE.PlaneGeometry(0.06, 0.34, 1, 4);
+  flagGeo.translate(0, -0.17, 0);
+  group.updateMatrixWorld(true);
+  const flags = FLAG_ANCHORS.map(({ pos, yaw }, i) => {
+    const anchor = new THREE.Object3D();
+    anchor.position.set(pos[0], pos[1], pos[2]).multiplyScalar(assets.scale);
+    anchor.position.y += assets.yOffset;
+    group.add(anchor);
+    anchor.updateMatrixWorld(true);
+    hips.attach(anchor);
+    const pivot = new THREE.Group();
+    const mesh = new THREE.Mesh(flagGeo, kit.Flag);
+    mesh.rotation.y = yaw;
+    mesh.scale.setScalar(assets.scale);
+    mesh.castShadow = true;
+    pivot.add(mesh);
+    group.add(pivot);
+    return { anchor, pivot, phase: i * 2.1 };
+  });
 
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(0.45, 0.62, 32),
@@ -154,6 +137,7 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
     team,
     group,
     rig,
+    flags,
     marker,
     icon,
     mixer,
@@ -227,4 +211,18 @@ export function updatePlayerClip(player, tier, speed) {
   next.paused = false;
   const base = tier === TIERS.GASSED ? 0.5 : 1;
   next.timeScale = base * THREE.MathUtils.clamp(speed / 6, 0.6, 1.4);
+}
+
+// Keep flags hanging from the belt: trail back with speed, flutter a little.
+const _fv = new THREE.Vector3();
+export function updateFlags(player, speed, time) {
+  player.group.updateMatrixWorld(true);
+  const trail = THREE.MathUtils.clamp(speed / 7, 0, 1);
+  for (const f of player.flags) {
+    f.anchor.getWorldPosition(_fv);
+    player.group.worldToLocal(_fv);
+    f.pivot.position.copy(_fv);
+    const flutter = Math.sin(time * (6 + speed * 1.6) + f.phase);
+    f.pivot.rotation.set(0.15 + trail * 1.05 + flutter * 0.12 * trail, 0, flutter * (0.05 + 0.18 * trail));
+  }
 }

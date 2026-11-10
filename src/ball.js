@@ -1,16 +1,40 @@
 import * as THREE from 'three';
+import { tex } from './materials.js';
 
 const GRAVITY = 20; // arcade-heavy so throws stay snappy
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 
+// Leather football: pebbled PBR leather, white laces on top, white stripes
+// near each tip (flag-football style).
 export function createBall(scene) {
-  const geo = new THREE.SphereGeometry(0.16, 20, 14);
+  const geo = new THREE.SphereGeometry(0.16, 40, 24);
   geo.scale(1.45, 1, 1); // football ellipsoid, long axis on X
-  const mesh = new THREE.Mesh(
-    geo,
-    new THREE.MeshStandardMaterial({ color: 0x7a4526, roughness: 0.6 })
-  );
+  const leather = new THREE.MeshPhysicalMaterial({
+    color: 0x6e3518,
+    roughness: 0.55,
+    clearcoat: 0.35,
+    clearcoatRoughness: 0.4,
+    normalMap: tex('leather_normal', { repeat: 4 }),
+    normalScale: new THREE.Vector2(0.8, 0.8),
+  });
+  const mesh = new THREE.Mesh(geo, leather);
   mesh.castShadow = true;
+
+  const white = new THREE.MeshStandardMaterial({ color: 0xf2efe6, roughness: 0.6 });
+  const lace = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.012, 0.018), white);
+  lace.position.y = 0.158;
+  mesh.add(lace);
+  for (let i = -3; i <= 3; i++) {
+    const tick = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.01, 0.05), white);
+    tick.position.set(i * 0.022, 0.159, 0);
+    mesh.add(tick);
+  }
+  for (const s of [-1, 1]) {
+    const stripe = new THREE.Mesh(new THREE.TorusGeometry(0.121, 0.008, 6, 32), white);
+    stripe.rotation.y = Math.PI / 2;
+    stripe.position.x = s * 0.15;
+    mesh.add(stripe);
+  }
   scene.add(mesh);
   return {
     mesh,

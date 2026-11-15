@@ -8,12 +8,13 @@ import { FIELD } from './field.js';
 
 export const ACID = 0xd4f00f;
 export const BOX_SPOTS = [
-  [0, -6.5],
-  [0, 6.5],
-  [-8, -4],
-  [-8, 4],
-  [8, -4],
-  [8, 4],
+  [0, -10],
+  [0, 10],
+  [-10, -5],
+  [-10, 5],
+  [10, -5],
+  [10, 5],
+  [0, 0],
 ];
 export const EFFECT_TYPES = ['turbo', 'trap', 'oil'];
 
@@ -27,7 +28,7 @@ export function createPowerups(scene) {
   const boxMat = new THREE.MeshStandardMaterial({
     color: ACID,
     emissive: ACID,
-    emissiveIntensity: 1.5,
+    emissiveIntensity: 0.75, // higher blows out to a white blob under bloom
     roughness: 0.35,
   });
   const boxes = BOX_SPOTS.map(([x, z]) => {
@@ -46,6 +47,7 @@ export function createPowerups(scene) {
 
   const hazards = [];
   let forcedNext = null; // test hook: force the next effect type
+  let enabled = true;
 
   function makeHazardMesh(type) {
     if (type === 'trap') {
@@ -85,6 +87,7 @@ export function createPowerups(scene) {
   }
 
   function update(dt, players, { onPickup, onHazardHit }) {
+    if (!enabled) return;
     for (const box of boxes) {
       box.bobT += dt;
       if (box.cooldown > 0) {
@@ -145,6 +148,18 @@ export function createPowerups(scene) {
     hazards,
     update,
     spawnHazard,
+    // Street-rules toggle: hide the boxes and stop spawning when off.
+    setEnabled(on) {
+      enabled = on;
+      for (const box of boxes) {
+        box.mesh.visible = on && box.cooldown <= 0;
+        box.glow.visible = on && box.cooldown <= 0;
+      }
+      if (!on) {
+        for (const h of hazards) scene.remove(h.mesh);
+        hazards.length = 0;
+      }
+    },
     forceNext: (type) => (forcedNext = type),
   };
 }

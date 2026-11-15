@@ -1,14 +1,23 @@
 {
-  "name": "Street Football",
-  "short_name": "Street Football",
+  "name": "Street Football \u2014 7 on 7",
+  "short_name": "Street FB",
   "start_url": "./",
   "scope": "./",
   "display": "fullscreen",
   "orientation": "landscape",
-  "background_color": "#1c2430",
-  "theme_color": "#1c2430",
+  "background_color": "#0f1512",
+  "theme_color": "#0f1512",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
-  ]
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "description": "Arcade 7-on-7 street football. Grass, concrete or the dust bowl."
 }

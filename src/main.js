@@ -4,219 +4,338 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { StaminaMeter, TIERS } from './stamina.js';
-import { FIELD, buildField, buildLighting, createDriveLines } from './field.js';
+import { FIELD, buildWorld, createDriveLines, SURFACES } from './field.js';
 import { createBall, holdBall, throwBall, updateBall } from './ball.js';
 import { loadPlayerAssets, createPlayer, updatePlayerClip, aimBone } from './players.js';
 import { createPowerups } from './powerups.js';
 import { createFX } from './effects.js';
+import { createUI } from './ui.js';
+import { createTouchControls, lockViewport } from './touch.js';
+import { createAudio } from './audio.js';
+import {
+  SLOT, ROSTER_SIZE, TARGET_SLOTS, TARGET_KEYS, TARGET_LETTERS,
+  OFFENSE_PLAYS, DEFENSE_PLAYS, ZONE_SPOTS,
+  alignmentFor, routeWaypoints, runWaypoints,
+  pickOffensivePlay, pickDefensivePlay,
+} from './playbook.js';
 
-// Street football — arcade 5v5, down-and-distance, mystery boxes.
-// Blue (user, green kit) attacks +X; red (red/white kit) attacks -X.
-// Offense: QB (0), receivers A/S/D (1-3), Center (4). Defense: rusher (0),
-// corners (1-3), spy (4). Carrier moves: Z spin, X juke, Shift breaks
-// tackles; defense contests passes with E.
+// ---------------------------------------------------------------------------
+// Street Football — 7-on-7, street rules.
+//
+// Real 7-on-7: 40-yard field, 10-yard end zones, first down at midfield,
+// four downs to get there and four more to score, no kicking, a pass clock
+// and a counted rush. Street rules on top of that: designed runs, blocking,
+// spin/juke/truck, and a style meter that cashes in as a GAMEBREAKER.
+// ---------------------------------------------------------------------------
 
-const TEAM = { BLUE: 0, RED: 1 };
-const TEAM_NAMES = { [TEAM.BLUE]: 'BLUE', [TEAM.RED]: 'RED' };
-const TEAM_COLORS = { [TEAM.BLUE]: 0x3b82f6, [TEAM.RED]: 0xef4444 };
-const ATTACK_DIR = { [TEAM.BLUE]: 1, [TEAM.RED]: -1 };
+const TEAM = { HOME: 0, AWAY: 1 };
+const TEAM_NAMES = { [TEAM.HOME]: 'HOME', [TEAM.AWAY]: 'AWAY' };
+const TEAM_COLORS = { [TEAM.HOME]: 0xb9f227, [TEAM.AWAY]: 0xef4444 };
+const ATTACK_DIR = { [TEAM.HOME]: 1, [TEAM.AWAY]: -1 };
+const USER_TEAM = TEAM.HOME;
 
-const ROSTER_SIZE = 5;
-const QB = 0;
-const CENTER = 4;
-const RECEIVER_SLOTS = [1, 2, 3];
-const THROW_KEYS = { a: 1, s: 2, d: 3, f: 4 };
-const ICON_LETTERS = { 1: 'A', 2: 'S', 3: 'D', 4: 'F' };
-
-const DRIVE_START = FIELD.halfLength - 6;
-const MARKER_1_X = 0;
+// Rules
 const DOWNS_PER_SET = 4;
-const TD_POINTS = 7;
-const CENTER_RELEASES_ON_DOWN = (down) => down <= 2;
+const TD_POINTS = 6;
+const START_FROM_OWN = 10; // yards out from your own goal line
+const PASS_CLOCK = 4.0; // seconds the QB gets before it's a sack
+const CONV_SPOT = { 1: 5, 2: 10 }; // conversion distance from the goal line
+const GAME_SECONDS = 300;
+const RUNOFF_PER_PLAY = 7; // clock burned between snaps
 
-const WALK_SPEED = 4.2;
-const SPRINT_SPEED = { [TIERS.TURBO]: 8, [TIERS.REGULAR]: 6.3, [TIERS.GASSED]: 4.8 };
-const WR_SPEED = 6.2;
-const DEF_SPEED = 5.9;
-const BLOCKER_SPEED = 5.4;
+// Movement
+const WALK_SPEED = 5.0;
+const SPRINT_SPEED = { [TIERS.TURBO]: 9.2, [TIERS.REGULAR]: 7.4, [TIERS.GASSED]: 5.6 };
+const WR_SPEED = 7.4;
+const DEF_SPEED = 7.1;
+const BLOCKER_SPEED = 6.4;
 const TURN_RATE = 12;
-const TACKLE_DIST = 0.85;
-const CATCH_DIST = 1.2;
-const THROW_SPEED = 16;
-const BLOCK_RADIUS = 0.95;
+const SEPARATION = 0.72;
 
-const SNAP_FLIGHT_TIME = 0.22;
-const CENTER_RELEASE_AT = 1.25;
-const AI_SNAP_DELAY = 1.3;
-// Pass-rush delay rule: 3s protection on 1st/2nd/4th, 2s on 3rd.
-const rushDelay = () => (drive.down === 3 ? 2 : 3);
-const QB_MIN_HOLD = 1.1;
-const QB_OPEN_DIST = 2.8;
-const QB_SCRAMBLE_AT = 2.9;
-const DEAD_PAUSE = 1.6;
+// Contact
+const TACKLE_DIST = 0.95;
+const CATCH_DIST = 1.55;
+const DIVE_CATCH_DIST = 2.1;
+const THROW_SPEED = 19;
+const BLOCK_RADIUS = 1.25;
+const TACKLE_WINDOW = 0.3;
+const TACKLE_DRAG = 0.38;
+const TACKLE_BREAK_COST = 34;
+const SNAP_FLIGHT_TIME = 0.24;
+
+// Moves
+const SPIN_DURATION = 0.45;
+const JUKE_DURATION = 0.28;
+const TRUCK_DURATION = 0.4;
+const MOVE_COOLDOWN = 1.3;
+const MOVE_SELL_RADIUS = 3.4;
+const BURST_DURATION = 0.32;
+
+// Style / gamebreaker
+const STYLE_MAX = 100;
+const GB_DURATION = 7.5;
+const STYLE = {
+  completion: 7, bigGain: 11, brokenTackle: 13, soldMove: 6,
+  touchdown: 26, interception: 22, sack: 14, stop: 8,
+};
 
 // Powerups
 const TURBO_DURATION = 4;
 const STUN_DURATION = 1.5;
 const SLIP_DURATION = 1.0;
-const PICKUP_LABELS = {
-  turbo: 'TURBO BOOST!',
-  trap: 'ELECTRIC TRAP DROPPED!',
-  oil: 'OIL SLICK DROPPED!',
-};
+const PICKUP_LABELS = { turbo: 'TURBO BOOST!', trap: 'ELECTRIC TRAP DROPPED!', oil: 'OIL SLICK DROPPED!' };
 
-// Tackle breaking / moves
-const TACKLE_WINDOW = 0.3;
-const TACKLE_DRAG = 0.35; // carrier speed multiplier while being grabbed
-const TACKLE_BREAK_COST = 40; // stamina burned each time Shift busts a tackle
-const SPIN_DURATION = 0.45;
-const JUKE_DURATION = 0.28;
-const MOVE_COOLDOWN = 1.5;
-const MOVE_SELL_RADIUS = 3.0;
-const BURST_DURATION = 0.32;
-
-// Interception
-const INT_RADIUS = 1.6;
-const INT_CHANCE = 0.55;
+// AI timing
+const AI_SNAP_DELAY = 1.1;
+const QB_MIN_HOLD = 0.75;
+const QB_OPEN_DIST = 3.1;
+const DEAD_PAUSE = 1.7;
+const INT_RADIUS = 1.9;
+const INT_CHANCE = 0.5;
 const INT_LOCKOUT = 0.35;
 
-const CAM_BACK = 8.5;
-const CAM_HEIGHT = 6.2;
-const CAM_SIDE = 2.5;
-const CAM_LOOKAHEAD = 6;
-const CAM_ROLL = 0.015;
+// Camera
+const CAM_BACK = 11;
+const CAM_HEIGHT = 7.6;
+const CAM_SIDE = 3.0;
+const CAM_LOOKAHEAD = 7;
+const CAM_ROLL = 0.012;
 const CAM_SMOOTHING = 4;
 
-// Scene / renderer
+// ---- Quality --------------------------------------------------------------
+// A phone GPU does not want 3x supersampling, a 2k shadow map and a
+// full-resolution bloom pass. Pick a tier once and build to it.
+const IS_MOBILE =
+  (window.matchMedia?.('(pointer: coarse)').matches ?? false) ||
+  Math.min(screen.width, screen.height) < 820;
+const QUALITY = IS_MOBILE
+  ? { pixelRatio: 1.5, shadow: 1024, crowdFill: 0.62, crowdStride: 2, bloomScale: 0.55 }
+  : { pixelRatio: 2, shadow: 2048, crowdFill: 1, crowdStride: 1, bloomScale: 1 };
+
+// ---- Renderer -------------------------------------------------------------
+
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 300);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const camera = new THREE.PerspectiveCamera(56, window.innerWidth / window.innerHeight, 0.1, 400);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY.pixelRatio));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1.12;
 document.querySelector('#app').appendChild(renderer.domElement);
 
-buildLighting(scene);
-// Cool rim/back light for edge pop on the cel-shaded players (no shadows).
-const rimLight = new THREE.DirectionalLight(0x9fd8ff, 0.5);
-rimLight.position.set(-25, 16, 28);
-scene.add(rimLight);
-
-buildField(scene);
 const { losLine, markerLine } = createDriveLines(scene);
 const ball = createBall(scene);
 const powerups = createPowerups(scene);
 const fx = createFX(scene, camera);
 
-// Subtle bloom so the acid-yellow pickups/flashes pop; high threshold keeps
-// the rest of the golden-hour scene clean.
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.4, 0.3, 0.85
+  new THREE.Vector2(
+    window.innerWidth * QUALITY.bloomScale,
+    window.innerHeight * QUALITY.bloomScale
+  ),
+  0.4, 0.3, 0.85
 );
+// composer.setSize() would push the full canvas size into every pass. Keep
+// the scene sharp and let only the bloom blur chain run at a lower
+// resolution — that is where the fill-rate cost actually is.
+if (QUALITY.bloomScale < 1) {
+  const baseSetSize = bloomPass.setSize.bind(bloomPass);
+  bloomPass.setSize = (w, h) =>
+    baseSetSize(
+      Math.max(1, Math.round(w * QUALITY.bloomScale)),
+      Math.max(1, Math.round(h * QUALITY.bloomScale))
+    );
+  bloomPass.setSize(window.innerWidth, window.innerHeight);
+}
 composer.addPass(bloomPass);
 composer.addPass(new OutputPass());
 
-// HUD
-const stamina = new StaminaMeter({ regularBelow: 60, gassedBelow: 25 });
-const staminaFill = document.querySelector('#stamina-fill');
-const staminaLabel = document.querySelector('#stamina-label');
-const scoreEl = document.querySelector('#score');
-const downDistEl = document.querySelector('#downdist');
-const bannerEl = document.querySelector('#banner');
-const controlsEl = document.querySelector('#controls');
-const targetsEl = document.querySelector('#targets');
-const pickupEl = document.querySelector('#pickup');
-const targetChips = {
-  1: document.querySelector('#chip-a'),
-  2: document.querySelector('#chip-s'),
-  3: document.querySelector('#chip-d'),
-  4: document.querySelector('#chip-f'),
-};
-const TIER_COLORS = {
-  [TIERS.TURBO]: '#22c55e',
-  [TIERS.REGULAR]: '#eab308',
-  [TIERS.GASSED]: '#ef4444',
-};
-const DOWN_NAMES = ['1ST', '2ND', '3RD', '4TH'];
+let world = null;
+function setSurface(key) {
+  world?.dispose();
+  world = buildWorld(scene, key, QUALITY);
+}
 
-// Game state
+// ---- Shell: UI, touch, audio ---------------------------------------------
+
+lockViewport();
+const BASE = import.meta.env.BASE_URL;
+const audio = createAudio();
+const ui = createUI({
+  surfaces: Object.values(SURFACES),
+  art: {
+    title: `${BASE}art/title-key.jpg`,
+    fields: {
+      grass: `${BASE}art/thumb-field-grass.jpg`,
+      concrete: `${BASE}art/thumb-field-concrete.jpg`,
+      dirt: `${BASE}art/thumb-field-dirt.jpg`,
+    },
+  },
+});
+
+const touch = createTouchControls({
+  onFirstTouch: () => audio.start(),
+  onSnap: () => userSnap(),
+  onThrow: (slot, lob) => userThrow(slot, lob),
+  onMove: (type) => userMove(type),
+  onSwitch: () => switchControl(),
+  onPick: () => userContest(),
+  onGamebreaker: () => activateGamebreaker(),
+  onMenu: () => toggleSound(),
+});
+
+// ---- State ----------------------------------------------------------------
+
 const players = [];
 let controlled = null;
-const score = { [TEAM.BLUE]: 0, [TEAM.RED]: 0 };
-const drive = { offense: TEAM.BLUE, los: -DRIVE_START, markerIdx: 0, down: 1 };
+let assets = null;
 let phase = 'loading';
+
+const score = { [TEAM.HOME]: 0, [TEAM.AWAY]: 0 };
+const drive = { offense: TEAM.HOME, los: 0, lineToGain: 0, down: 1, goalToGo: false };
+const meta = {
+  clock: GAME_SECONDS, options: { pickups: true, sound: true }, over: false,
+  lastResult: null, // { reason, spot, gain } — the reason the last play ended
+};
+
+const play = {
+  off: null, def: null, t: 0,
+  routes: new Map(),
+  coverage: new Map(), // defender -> { mode:'man'|'zone'|'rush'|'spy', target }
+  blockers: new Set(),
+  thrown: false, snapping: false, handoffDone: false,
+  qbFree: false, passClock: PASS_CLOCK, clockRunning: false,
+  carrierSlot: null, startX: 0,
+  tackle: null, intReturn: null, lastThrowAt: 0,
+};
+
+const style = { value: 0, active: 0 };
 let deadTimer = 0;
 let lineupTimer = 0;
 let hitStopT = 0;
-let pickupMsgT = 0;
 let intLockout = 0;
-let bannerT = 0; // transient banner during live play (e.g. INTERCEPTED!)
-const play = {
-  t: 0,
-  routes: new Map(),
-  assignments: new Map(),
-  thrown: false,
-  qbScrambled: false,
-  snapping: false,
-  centerReleased: false,
-  tackle: null, // { defender, t, sprintHeld }
-  intReturn: null, // team currently returning an interception, or null
-};
+let bannerT = 0;
+let conversion = null; // { team, points } while a conversion try is live
+let pendingCall = null;
+
+// ---- Small helpers --------------------------------------------------------
 
 const offAttack = () => ATTACK_DIR[drive.offense];
-// Direction the action is heading: normally the offense's attack, but during
-// an interception return it flips to the returning team's. Drives both the
-// camera and the arrow-key frame.
-const viewAttack = () =>
-  play.intReturn !== null ? ATTACK_DIR[play.intReturn] : offAttack();
-const markerX = () =>
-  drive.markerIdx === 0 ? MARKER_1_X : offAttack() * FIELD.halfLength;
+const viewAttack = () => (play.intReturn !== null ? ATTACK_DIR[play.intReturn] : offAttack());
+const defenseTeam = () => (drive.offense === TEAM.HOME ? TEAM.AWAY : TEAM.HOME);
 const teamPlayers = (team) => players.filter((p) => p.team === team);
-const defenseTeam = () => (drive.offense === TEAM.BLUE ? TEAM.RED : TEAM.BLUE);
-const offensePlayer = (slot) =>
-  players.find((p) => p.team === drive.offense && p.slot === slot);
-const defensePlayer = (slot) =>
-  players.find((p) => p.team === defenseTeam() && p.slot === slot);
+const offensePlayer = (slot) => players.find((p) => p.team === drive.offense && p.slot === slot);
+const defensePlayer = (slot) => players.find((p) => p.team === defenseTeam() && p.slot === slot);
 const incapacitated = (p) => p.stunT > 0 || p.slipT > 0;
+const userOnOffense = () => drive.offense === USER_TEAM;
+const gbActive = () => style.active > 0;
 
 function hitStop(seconds) {
   hitStopT = Math.max(hitStopT, seconds);
 }
+function cheer(amount) {
+  world?.crowd.cheer(amount);
+}
+function addStyle(amount) {
+  if (!userOnOffense() && !play.intReturn) amount *= 0.9;
+  style.value = Math.min(STYLE_MAX, style.value + amount);
+}
+function clockText(seconds) {
+  const s = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+function yardsOut(x, team) {
+  return Math.round(FIELD.halfLength - ATTACK_DIR[team] * x);
+}
+function ballOnText() {
+  const out = yardsOut(drive.los, drive.offense);
+  return out <= 20 ? `OPP ${out}` : `OWN ${40 - out}`;
+}
+function toGoYards() {
+  return Math.max(1, Math.round(offAttack() * (drive.lineToGain - drive.los)));
+}
 
-// Input
+// ---- Input ----------------------------------------------------------------
+
 const keys = new Set();
 window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
+  if (!audio.started) audio.start();
+  if (k === ' ') e.preventDefault();
+  if (keys.has(k)) return;
   keys.add(k);
-  if (k === ' ') {
-    e.preventDefault();
-    if (phase === 'lineup' && drive.offense === TEAM.BLUE) snap();
-  }
-  if (k in THROW_KEYS && phase === 'live' && drive.offense === TEAM.BLUE) {
-    const slot = THROW_KEYS[k];
-    if (slot === CENTER && !play.centerReleased) return;
-    if (ball.carrier === controlled && controlled.role === 'qb') {
-      throwToReceiver(offensePlayer(slot));
-    }
-  }
-  if ((k === 'z' || k === 'x') && phase === 'live' && ball.carrier === controlled) {
-    startMove(controlled, k === 'z' ? 'spin' : 'juke');
-  }
-  if (k === 'e') attemptInterception();
-  if (k === 'q' && drive.offense === TEAM.RED) switchControl();
+  if (k === ' ') userSnap();
+  const ti = TARGET_KEYS.indexOf(k);
+  if (ti >= 0) userThrow(TARGET_SLOTS[ti], keys.has('shift'));
+  if (k === 'z') userMove('spin');
+  if (k === 'x') userMove('juke');
+  if (k === 'c') userMove('truck');
+  if (k === 'e') userContest();
+  if (k === 'q') switchControl();
+  if (k === 'v') activateGamebreaker();
+  if (k === 'm') toggleSound();
 });
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 window.addEventListener('blur', () => keys.clear());
 
+function toggleSound() {
+  audio.setMuted(!audio.muted);
+  ui.hud.toast(audio.muted ? 'SOUND OFF' : 'SOUND ON');
+}
+
+function userSnap() {
+  if (phase === 'lineup' && userOnOffense()) snap();
+}
+
+function userThrow(slot, lob) {
+  if (phase !== 'live' || !userOnOffense()) return;
+  if (ball.carrier !== controlled) return;
+  const carrier = ball.carrier;
+  // Only the quarterback throws, and only from behind the line — except on
+  // an option keep, where the carrier can still pull up and sling it.
+  const behindLOS = offAttack() * (carrier.group.position.x - drive.los) <= 0.5;
+  const mayThrow = carrier.slot === SLOT.QB || (play.off?.keepPass && behindLOS);
+  if (!behindLOS) {
+    ui.hud.toast('PAST THE LINE — RUN IT');
+    return;
+  }
+  if (!mayThrow) return;
+  const target = offensePlayer(slot);
+  if (!target || target === carrier) return;
+  throwToReceiver(target, lob);
+}
+
+function userMove(type) {
+  if (phase !== 'live' || !controlled) return;
+  if (ball.carrier === controlled || controlled.team !== drive.offense) startMove(controlled, type);
+}
+
+function userContest() {
+  if (phase !== 'live' || !controlled) return;
+  if (controlled.team === drive.offense && ball.state === 'thrown') {
+    controlled.diveT = 0.5; // dive/stretch catch
+    return;
+  }
+  attemptInterception();
+}
+
 function switchControl() {
-  if (!controlled) return;
-  const blues = teamPlayers(TEAM.BLUE);
-  setControlled(blues[(blues.indexOf(controlled) + 1) % blues.length]);
+  if (!controlled || phase === 'menu') return;
+  const mine = teamPlayers(USER_TEAM).filter((p) => p !== ball.carrier || p.team !== drive.offense);
+  if (!mine.length) return;
+  // Switch to whoever is closest to the ball that isn't the current guy.
+  let best = null;
+  let bd = Infinity;
+  for (const p of mine) {
+    if (p === controlled) continue;
+    const d = p.group.position.distanceTo(ball.mesh.position);
+    if (d < bd) { bd = d; best = p; }
+  }
+  if (best) setControlled(best);
 }
 
 function setControlled(p) {
@@ -225,17 +344,30 @@ function setControlled(p) {
   if (controlled) controlled.marker.visible = true;
 }
 
-// ---- Spin / juke ----
+function activateGamebreaker() {
+  if (style.value < STYLE_MAX || gbActive() || phase !== 'live') return;
+  style.value = 0;
+  style.active = GB_DURATION;
+  bloomPass.strength = 1.1;
+  fx.shake(0.4);
+  hitStop(0.12);
+  cheer(1.4);
+  audio.touchdown();
+  ui.hud.banner('GAMEBREAKER', 'TAKE IT TO THE HOUSE');
+  bannerT = 1.5;
+}
+
+// ---- Moves ---------------------------------------------------------------
 
 function startMove(p, type) {
   if (p.moveCooldown > 0 || p.moveState || incapacitated(p)) return;
+  if (type === 'truck' && p.stam.value < 20) return;
   let dir = 0;
   if (type === 'juke') {
     const attack = ATTACK_DIR[p.team];
-    if (keys.has('arrowleft')) dir = -attack;
-    else if (keys.has('arrowright')) dir = attack;
+    const lateral = stickLateral();
+    if (lateral !== 0) dir = lateral * attack;
     else {
-      // no lateral input: juke away from the nearest defender
       let nearest = null;
       let nd = Infinity;
       for (const o of players) {
@@ -246,129 +378,263 @@ function startMove(p, type) {
       dir = nearest && nearest.group.position.z > p.group.position.z ? -1 : 1;
     }
   }
-  p.moveState = { type, t: 0, dur: type === 'spin' ? SPIN_DURATION : JUKE_DURATION, dir };
+  const dur = type === 'spin' ? SPIN_DURATION : type === 'truck' ? TRUCK_DURATION : JUKE_DURATION;
+  p.moveState = { type, t: 0, dur, dir };
   p.moveCooldown = MOVE_COOLDOWN;
+  if (type === 'truck') p.stam.value = Math.max(0, p.stam.value - 18);
 
-  // Sell the move: nearby pursuing defenders overcommit, then stumble.
+  let sold = false;
   for (const d of players) {
     if (d.team === p.team || incapacitated(d)) continue;
-    if (d.group.position.distanceTo(p.group.position) > MOVE_SELL_RADIUS) continue;
+    const dist = d.group.position.distanceTo(p.group.position);
+    if (dist > MOVE_SELL_RADIUS) continue;
+    if (type === 'truck') {
+      // Power move: run through the guy instead of around him.
+      if (dist < 2.0) {
+        d.stumbleT = 1.1;
+        d.tackleCooldown = 1.3;
+        d.velocity.set(0, 0, 0);
+        fx.hitFlash(d.group.position.clone().setY(1.1), 1.3);
+        fx.shake(0.22);
+        hitStop(0.05);
+        audio.hit(1.2);
+        sold = true;
+      }
+      continue;
+    }
     if (d.velocity.lengthSq() < 0.5) continue;
-    d.commitTarget
-      .copy(d.velocity)
-      .normalize()
-      .multiplyScalar(2.6)
-      .add(p.group.position);
+    d.commitTarget.copy(d.velocity).normalize().multiplyScalar(2.8).add(p.group.position);
     d.commitT = 0.4;
-    d.stumbleT = 0.85; // includes the commit beat; slow re-track after
+    d.stumbleT = 0.85;
+    sold = true;
+  }
+  if (sold && p === controlled) {
+    addStyle(STYLE.soldMove);
+    if (type !== 'truck') audio.catchBall();
   }
 }
 
-// ---- Interception ----
+// ---- Interception / contest ----------------------------------------------
 
 function attemptInterception() {
   if (phase !== 'live' || ball.state !== 'thrown' || play.snapping) return;
-  if (!controlled || controlled.team !== defenseTeam() || intLockout > 0) return;
+  if (!controlled || controlled.team === drive.offense || intLockout > 0) return;
   if (controlled.group.position.distanceTo(ball.mesh.position) > INT_RADIUS) return;
   intLockout = INT_LOCKOUT;
   fx.hitFlash(ball.mesh.position.clone(), 0.9);
   if (Math.random() < INT_CHANCE) {
-    // Live return: the picker keeps the ball and runs it back.
-    hitStop(0.06);
-    fx.shake(0.25);
+    hitStop(0.07);
+    fx.shake(0.28);
+    audio.hit(1.1);
+    cheer(1.2);
     holdBall(ball, controlled);
     play.intReturn = controlled.team;
     play.tackle = null;
-    showBanner('INTERCEPTED!', 1.4);
+    play.clockRunning = false;
+    if (controlled.team === USER_TEAM) addStyle(STYLE.interception);
+    ui.hud.banner('INTERCEPTED!');
+    bannerT = 1.4;
+  } else {
+    // Broken up instead of picked.
+    ball.velocity.multiplyScalar(0.25);
+    ball.velocity.y = -2;
+    audio.hit(0.6);
   }
 }
 
-// ---- Play lifecycle ----
+// ---- Drive bookkeeping ----------------------------------------------------
+
+function startDrive(team, losX) {
+  drive.offense = team;
+  const attack = ATTACK_DIR[team];
+  drive.los = THREE.MathUtils.clamp(losX, -FIELD.halfLength + 1, FIELD.halfLength - 1);
+  drive.down = 1;
+  setSeriesTarget();
+  conversion = null;
+}
+
+// Line to gain is midfield until you cross it, then it's the goal line.
+function setSeriesTarget() {
+  const attack = offAttack();
+  if (attack * drive.los < 0) {
+    drive.lineToGain = 0;
+    drive.goalToGo = false;
+  } else {
+    drive.lineToGain = attack * FIELD.halfLength;
+    drive.goalToGo = true;
+  }
+}
+
+function spotBall(spotX) {
+  const attack = offAttack();
+  drive.los = THREE.MathUtils.clamp(spotX, -FIELD.halfLength + 1, FIELD.halfLength - 1);
+  if (attack * (drive.los - drive.lineToGain) >= 0 && !drive.goalToGo) {
+    drive.down = 1;
+    setSeriesTarget();
+    return true; // first down
+  }
+  return false;
+}
+
+// ---- Play lifecycle -------------------------------------------------------
+
+function toPlayCall() {
+  phase = 'playcall';
+  touch.setMode('menu');
+  const side = userOnOffense() ? 'offense' : 'defense';
+  ui.showPlayCall({
+    side,
+    down: drive.down,
+    toGo: drive.goalToGo ? 'GOAL' : toGoYards(),
+    ballOn: conversion ? `${CONV_SPOT[conversion.points]} YD CONVERSION` : ballOnText(),
+    clock: clockText(meta.clock),
+    score: [score[TEAM.HOME], score[TEAM.AWAY]],
+    onPick: (chosen) => {
+      audio.uiTap();
+      if (side === 'offense') {
+        pendingCall = {
+          off: chosen,
+          def: pickDefensivePlay(drive.down, drive.goalToGo ? 3 : toGoYards()),
+        };
+      } else {
+        pendingCall = {
+          off: pickOffensivePlay(drive.down, drive.goalToGo ? 3 : toGoYards(), drive.goalToGo),
+          def: chosen,
+        };
+      }
+      ui.showGame();
+      lineupPlay();
+    },
+  });
+}
 
 function lineupPlay() {
   phase = 'lineup';
   lineupTimer = 0;
+  play.off = pendingCall.off;
+  play.def = pendingCall.def;
   play.t = 0;
   play.thrown = false;
-  play.qbScrambled = false;
   play.snapping = false;
-  play.centerReleased = false;
+  play.handoffDone = false;
+  play.handoffAt = 0;
+  play.qbFree = !!play.off.qbFree;
+  play.qbScrambling = false;
+  play.passClock = PASS_CLOCK;
+  play.clockRunning = false;
   play.tackle = null;
   play.intReturn = null;
+  play.startX = drive.los;
   play.routes.clear();
-  play.assignments.clear();
+  play.coverage.clear();
+  play.blockers.clear();
+  play.carrierSlot = Object.entries(play.off.assign).find(([, a]) => a.carry)?.[0];
+  if (play.carrierSlot !== undefined) play.carrierSlot = Number(play.carrierSlot);
 
   const attack = offAttack();
   const offense = teamPlayers(drive.offense);
   const defense = teamPlayers(defenseTeam());
+  const offFacing = attack > 0 ? Math.PI / 2 : -Math.PI / 2;
 
-  const spots = {
-    qb: [drive.los - attack * 2.8, 0],
-    wr1: [drive.los - attack * 0.6, -6.5],
-    wr2: [drive.los - attack * 0.6, 6.5],
-    wr3: [drive.los - attack * 0.6, -3.5],
-    center: [drive.los - attack * 0.5, 0],
-    rusher: [drive.los + attack * 2.0, 0.8],
-    corner1: [drive.los + attack * 1.8, -6.5],
-    corner2: [drive.los + attack * 1.8, 6.5],
-    corner3: [drive.los + attack * 1.8, -3.5],
-    spy: [drive.los + attack * 4.5, 0],
-  };
-  const place = (p, [x, z], facing) => {
+  const reset = (p, x, z, facing) => {
     p.group.position.set(x, 0, z);
     p.velocity.set(0, 0, 0);
     p.heading = facing;
     p.group.rotation.y = facing;
-    p.rig.rotation.x = 0;
-    p.rig.rotation.z = 0;
-    p.stunT = p.slipT = p.stumbleT = p.commitT = p.burstT = 0;
+    p.rig.rotation.set(0, 0, 0);
+    p.stunT = p.slipT = p.stumbleT = p.commitT = p.burstT = p.diveT = 0;
     p.moveState = null;
     p.moveCooldown = 0;
     p.tackleCooldown = 0;
+    p.blockedBy = null; // stale block assignments would carry between plays
+    p.stam.value = Math.min(p.stam.max, p.stam.value + 34); // breathe between plays
   };
-  const offFacing = attack > 0 ? Math.PI / 2 : -Math.PI / 2;
-  const OFF_SPOTS = ['qb', 'wr1', 'wr2', 'wr3', 'center'];
-  const OFF_ROLES = ['qb', 'wr', 'wr', 'wr', 'center'];
-  const DEF_SPOTS = ['rusher', 'corner1', 'corner2', 'corner3', 'spy'];
-  const DEF_ROLES = ['rusher', 'corner', 'corner', 'corner', 'spy'];
-  offense.forEach((p) => {
-    p.role = OFF_ROLES[p.slot];
-    place(p, spots[OFF_SPOTS[p.slot]], offFacing);
-  });
-  defense.forEach((p) => {
-    p.role = DEF_ROLES[p.slot];
-    place(p, spots[DEF_SPOTS[p.slot]], -offFacing);
-  });
 
-  for (let slot = 0; slot < ROSTER_SIZE; slot++) {
-    play.assignments.set(defense[slot], offense[slot]);
+  for (const p of offense) {
+    const spot = alignmentFor(play.off, p.slot, drive.los, attack);
+    reset(p, spot.x, spot.z, offFacing);
   }
 
-  holdBall(ball, offense[CENTER]);
+  // Defense mirrors the offensive alignment, then takes its assignment.
+  assignDefense(defense, offense, attack, offFacing, reset);
+
+  holdBall(ball, offensePlayer(SLOT.C));
   updateBall(ball, 0);
 
   setControlled(
-    drive.offense === TEAM.BLUE ? offense[QB] : teamPlayers(TEAM.BLUE)[0]
+    userOnOffense()
+      ? offensePlayer(SLOT.QB)
+      : nearestTo(teamPlayers(USER_TEAM), offensePlayer(SLOT.QB).group.position)
   );
 
   losLine.position.x = drive.los;
-  markerLine.position.x = markerX();
-  markerLine.visible = drive.markerIdx === 0;
-  updateScoreboard();
-  updateTargetChips();
-  controlsEl.textContent =
-    drive.offense === TEAM.BLUE
-      ? 'SPACE snap · Arrows move · Shift sprint · A/S/D (F) throw · Z spin · X juke'
-      : 'Arrows move · Shift sprint · Q switch · E intercept';
+  markerLine.position.x = drive.lineToGain;
+  markerLine.visible = !drive.goalToGo;
+  refreshHUD();
+  touch.setMode(userOnOffense() ? 'lineup' : 'defense');
+  ui.hud.setPlayName(`${play.off.name}  vs  ${play.def.name}`);
+}
+
+function nearestTo(list, pos) {
+  let best = list[0];
+  let bd = Infinity;
+  for (const p of list) {
+    const d = p.group.position.distanceTo(pos);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+
+// Defensive alignment + per-defender job for the called coverage.
+function assignDefense(defense, offense, attack, offFacing, reset) {
+  const eligibles = TARGET_SLOTS.map((s) => offense.find((p) => p.slot === s)).filter(Boolean);
+  const rushers = play.def.rushers;
+  const spies = play.def.spies ?? 0;
+  const pool = [...defense];
+
+  // Edge rushers line up over the ball.
+  for (let i = 0; i < rushers; i++) {
+    const d = pool.shift();
+    const side = i === 0 ? 1 : -1;
+    reset(d, drive.los + attack * 1.6, side * 2.2, -offFacing);
+    play.coverage.set(d, { mode: 'rush' });
+  }
+  for (let i = 0; i < spies; i++) {
+    const d = pool.shift();
+    reset(d, drive.los + attack * 4.5, i === 0 ? -2.5 : 2.5, -offFacing);
+    play.coverage.set(d, { mode: 'spy' });
+  }
+
+  // Everyone left covers: man takes a body, zone takes a landmark, and any
+  // spare defender plays free safety over the top.
+  const covering = [...eligibles];
+  for (const d of pool) {
+    const man = covering.shift();
+    if (man) {
+      const spot = alignmentFor(play.off, man.slot, drive.los, attack);
+      const depth = man.slot === SLOT.RB ? 3.5 : 5.5;
+      reset(d, drive.los + attack * depth, spot.z * 0.92, -offFacing);
+      play.coverage.set(
+        d,
+        play.def.coverage === 'zone'
+          ? { mode: 'zone', spot: ZONE_SPOTS[man.slot], target: man }
+          : { mode: 'man', target: man }
+      );
+    } else {
+      reset(d, drive.los + attack * 13, 0, -offFacing);
+      play.coverage.set(d, { mode: 'free' });
+    }
+  }
 }
 
 function snap() {
   phase = 'live';
   play.t = 0;
   play.snapping = true;
+  audio.snapHike();
   const attack = offAttack();
-  const qb = offensePlayer(QB);
-  const center = offensePlayer(CENTER);
+  const qb = offensePlayer(SLOT.QB);
+  const center = offensePlayer(SLOT.C);
 
   const from = center.group.position.clone();
   from.y = 0.9;
@@ -376,180 +642,191 @@ function snap() {
   target.y = 1.2;
   throwBall(ball, from, target, SNAP_FLIGHT_TIME, qb);
 
-  for (const slot of RECEIVER_SLOTS) {
-    const wr = offensePlayer(slot);
-    play.routes.set(wr, makeRoute(wr, attack));
+  // Routes and blocking assignments straight off the called play.
+  for (const p of teamPlayers(drive.offense)) {
+    const a = play.off.assign[p.slot];
+    if (!a) continue;
+    if (a.route) {
+      const start = { x: p.group.position.x, z: p.group.position.z };
+      play.routes.set(p, routeWaypoints(a.route, start, attack));
+    } else if (a.carry) {
+      const start = { x: p.group.position.x, z: p.group.position.z };
+      play.routes.set(p, runWaypoints(a, start, drive.los, attack));
+    } else if (a.block) {
+      play.blockers.add(p);
+    }
   }
+  // Pass plays run on a clock; run plays don't.
+  play.clockRunning = play.off.type !== 'run' && !play.off.qbFree;
+  touch.setMode(userOnOffense() ? 'qb' : 'defense');
 }
 
-function makeRoute(wr, attack) {
-  const z = wr.group.position.z;
-  const deepX = attack * (FIELD.halfLength + FIELD.endZoneDepth - 1.5);
-  if (Math.random() < 0.5) {
-    return [new THREE.Vector3(deepX, 0, z)];
-  }
-  return [
-    new THREE.Vector3(drive.los + attack * 3.5, 0, z),
-    new THREE.Vector3(drive.los + attack * 12, 0, z * -0.35),
-    new THREE.Vector3(deepX, 0, z * -0.35),
-  ];
-}
-
-function makeCenterRoute(center, attack) {
-  const side = center.group.position.z >= 0 ? 1 : -1;
-  return [
-    new THREE.Vector3(drive.los + attack * 2.5, 0, side * 1.5),
-    new THREE.Vector3(drive.los + attack * 6, 0, side * 4),
-    new THREE.Vector3(drive.los + attack * 11, 0, side * 5),
-  ];
-}
-
-function throwToReceiver(wr) {
+function throwToReceiver(wr, lob = false) {
   if (ball.state !== 'held') return;
   const from = ball.mesh.position.clone();
-  from.y = 1.4;
+  from.y = 1.5;
   const target = wr.group.position.clone();
   target.y = 1.15;
-  const flightTime = THREE.MathUtils.clamp(from.distanceTo(target) / THROW_SPEED, 0.35, 1.3);
-  target.addScaledVector(wr.velocity, flightTime * 0.9);
+  const dist = from.distanceTo(target);
+  const speed = lob ? THROW_SPEED * 0.72 : THROW_SPEED;
+  const flightTime = THREE.MathUtils.clamp(dist / speed, 0.3, 1.6);
+  target.addScaledVector(wr.velocity, flightTime * 0.92); // lead the receiver
+
+  // Accuracy falls off with distance and with pressure in the pocket.
+  const qb = ball.carrier;
+  const pressure = qb ? THREE.MathUtils.clamp(2.6 - nearestOpponentDist(qb), 0, 2.6) / 2.6 : 0;
+  const err = (dist / 55 + pressure * 0.45) * (lob ? 0.8 : 1);
+  target.x += (Math.random() - 0.5) * err * 2.2;
+  target.z += (Math.random() - 0.5) * err * 2.6;
+
   throwBall(ball, from, target, flightTime, wr);
   play.thrown = true;
+  play.clockRunning = false;
+  play.lastThrowAt = play.t;
+  audio.throwBall();
+  touch.setMode(userOnOffense() ? 'carry' : 'defense');
 }
 
-function endPlay(reason, spotX) {
+// ---- Play endings ---------------------------------------------------------
+
+function freezePlay() {
   phase = 'dead';
   deadTimer = DEAD_PAUSE;
   ball.state = 'rest';
   ball.carrier = null;
   play.tackle = null;
+  play.clockRunning = false;
+  style.active = 0;
+  bloomPass.strength = 0.4;
+  meta.clock = Math.max(0, meta.clock - RUNOFF_PER_PLAY);
+  touch.setMode('menu');
+}
 
+function endPlay(reason, spotX) {
   const attack = offAttack();
-  let banner = '';
-  if (reason === 'incomplete') {
-    banner = 'INCOMPLETE';
-  } else {
-    const spot = THREE.MathUtils.clamp(spotX, -FIELD.halfLength + 0.5, FIELD.halfLength - 0.5);
-    banner = reason === 'oob' ? 'OUT OF BOUNDS' : attack * (spot - drive.los) < 0 ? 'SACKED' : 'TACKLED';
-    if (drive.markerIdx === 0 && attack * (spot - markerX()) >= 0) {
-      drive.los = spot;
-      drive.down = 1;
-      drive.markerIdx = 1;
-      showBanner('FIRST DOWN!');
-      return;
-    }
-    drive.los = spot;
+  const gained = attack * (spotX - play.startX);
+  meta.lastResult = { reason, spot: +spotX.toFixed(1), gain: +gained.toFixed(1) };
+  freezePlay();
+  audio.whistle();
+
+  if (conversion) {
+    showBanner(reason === 'incomplete' ? 'NO GOOD' : 'CONVERSION STOPPED');
+    afterConversion(false);
+    return;
   }
 
+  let head = '';
+  let sub = '';
+  if (reason === 'incomplete') {
+    head = 'INCOMPLETE';
+  } else if (reason === 'sack') {
+    head = 'SACK';
+    sub = 'PASS CLOCK EXPIRED';
+    if (!userOnOffense()) addStyle(STYLE.sack);
+    spotBallAndDown(spotX, head, sub);
+    return;
+  } else {
+    head = reason === 'oob' ? 'OUT OF BOUNDS' : gained < 0 ? 'DROPPED FOR A LOSS' : 'TACKLED';
+    sub = `${gained >= 0 ? '+' : ''}${Math.round(gained)} YARDS`;
+    if (userOnOffense() && gained >= 15) addStyle(STYLE.bigGain);
+    if (!userOnOffense() && gained <= 1) addStyle(STYLE.stop);
+    spotBallAndDown(spotX, head, sub);
+    return;
+  }
+  // Incompletion: ball stays put, down burns.
+  advanceDown(head, sub);
+}
+
+function spotBallAndDown(spotX, head, sub) {
+  const first = spotBall(spotX);
+  if (first) {
+    showBanner('FIRST DOWN', sub);
+    cheer(0.8);
+    return;
+  }
+  advanceDown(head, sub);
+}
+
+function advanceDown(head, sub) {
   drive.down += 1;
   if (drive.down > DOWNS_PER_SET) {
-    flipPossession();
-    showBanner(`${banner} — TURNOVER ON DOWNS`);
+    showBanner('TURNOVER ON DOWNS', head);
+    cheer(0.6);
+    const next = defenseTeam();
+    startDrive(next, -ATTACK_DIR[next] * (FIELD.halfLength - START_FROM_OWN));
   } else {
-    showBanner(banner);
+    showBanner(head, sub);
   }
 }
 
 function touchdownFor(team) {
-  phase = 'dead';
-  deadTimer = DEAD_PAUSE + 0.6;
-  ball.state = 'rest';
-  ball.carrier = null;
-  play.tackle = null;
+  freezePlay();
   score[team] += TD_POINTS;
-  showBanner(`TOUCHDOWN ${TEAM_NAMES[team]}!`);
-  // Ball goes to the team that got scored on, at their own line.
-  const receiving = team === TEAM.BLUE ? TEAM.RED : TEAM.BLUE;
-  drive.offense = receiving;
-  drive.los = -ATTACK_DIR[receiving] * DRIVE_START;
-  drive.down = 1;
-  drive.markerIdx = 0;
+  cheer(1.5);
+  audio.touchdown();
+  fx.shake(0.4);
+  showBanner(`TOUCHDOWN ${TEAM_NAMES[team]}!`, `${TD_POINTS} POINTS`);
+  if (team === USER_TEAM) addStyle(STYLE.touchdown);
+  deadTimer = DEAD_PAUSE + 0.8;
+  conversion = { team, points: null };
 }
 
-// An interception return ended short of the end zone: the returning team
-// takes over on downs at the spot.
+// After the score: a 1-point try from the 5 or a 2-point try from the 10.
+function startConversion(points) {
+  conversion.points = points;
+  const team = conversion.team;
+  drive.offense = team;
+  drive.down = 1;
+  drive.goalToGo = true;
+  const attack = ATTACK_DIR[team];
+  drive.los = attack * (FIELD.halfLength - CONV_SPOT[points]);
+  drive.lineToGain = attack * FIELD.halfLength;
+  toPlayCall();
+}
+
+function afterConversion(good) {
+  const team = conversion.team;
+  if (good) {
+    score[team] += conversion.points;
+    cheer(1);
+  }
+  conversion = null;
+  const receiving = team === TEAM.HOME ? TEAM.AWAY : TEAM.HOME;
+  startDrive(receiving, -ATTACK_DIR[receiving] * (FIELD.halfLength - START_FROM_OWN));
+}
+
 function endReturn(reason, spotX) {
   const team = play.intReturn;
-  phase = 'dead';
-  deadTimer = DEAD_PAUSE;
-  ball.state = 'rest';
-  ball.carrier = null;
-  play.tackle = null;
-  drive.offense = team;
-  drive.los = THREE.MathUtils.clamp(spotX, -FIELD.halfLength + 0.5, FIELD.halfLength - 0.5);
-  drive.down = 1;
-  drive.markerIdx = ATTACK_DIR[team] * drive.los >= 0 ? 1 : 0;
-  showBanner(reason === 'oob' ? 'RETURN OUT OF BOUNDS' : 'RETURNER DOWN!');
-}
-
-function flipPossession() {
-  drive.offense = defenseTeam();
-  drive.los = -offAttack() * DRIVE_START;
-  drive.down = 1;
-  drive.markerIdx = 0;
-}
-
-function showBanner(text, transientSeconds = 0) {
-  bannerEl.textContent = text;
-  bannerEl.style.display = 'block';
-  bannerT = transientSeconds;
-}
-
-function showPickup(player, type) {
-  pickupEl.textContent = `${PICKUP_LABELS[type]} — ${TEAM_NAMES[player.team]}`;
-  pickupEl.style.opacity = '1';
-  pickupMsgT = 2.2;
-}
-
-function updateScoreboard() {
-  scoreEl.textContent = `BLUE ${score[TEAM.BLUE]} — ${score[TEAM.RED]} RED`;
-  const dist = Math.max(1, Math.round(offAttack() * (markerX() - drive.los)));
-  const distText = drive.markerIdx === 1 ? 'GOAL' : dist;
-  downDistEl.textContent = `${TEAM_NAMES[drive.offense]} BALL · ${DOWN_NAMES[drive.down - 1]} & ${distText}`;
-}
-
-function updateTargetChips() {
-  const userOffense = drive.offense === TEAM.BLUE;
-  targetsEl.style.display = userOffense ? 'flex' : 'none';
-  if (!userOffense) return;
-  const live = phase === 'live' && !play.thrown && ball.carrier?.role === 'qb';
-  for (const slot of RECEIVER_SLOTS) {
-    targetChips[slot].className = live ? 'chip live' : 'chip';
+  freezePlay();
+  audio.whistle();
+  if (conversion) {
+    showBanner('TURNOVER');
+    afterConversion(false);
+    return;
   }
-  const centerEligible = CENTER_RELEASES_ON_DOWN(drive.down);
-  targetChips[CENTER].className = !centerEligible
-    ? 'chip off'
-    : live && play.centerReleased
-      ? 'chip live'
-      : 'chip';
+  showBanner(reason === 'oob' ? 'RETURN OUT OF BOUNDS' : 'RETURNER DOWN', 'TAKEOVER');
+  startDrive(team, spotX);
 }
 
-function updateIcons() {
-  const show =
-    phase === 'live' &&
-    drive.offense === TEAM.BLUE &&
-    !play.thrown &&
-    ball.carrier?.role === 'qb';
-  for (const p of teamPlayers(TEAM.BLUE)) {
-    if (!p.icon) continue;
-    p.icon.visible =
-      show && (p.slot === CENTER ? play.centerReleased : RECEIVER_SLOTS.includes(p.slot));
-  }
+function showBanner(text, sub = '') {
+  ui.hud.banner(text, sub);
+  bannerT = 0;
 }
 
-// ---- Powerup effects ----
+// ---- Powerups -------------------------------------------------------------
 
 function onPickup(player, type) {
-  showPickup(player, type);
+  ui.hud.toast(`${PICKUP_LABELS[type]} — ${TEAM_NAMES[player.team]}`);
   fx.hitFlash(player.group.position.clone().setY(1.2), 1.1);
-  if (type === 'turbo') {
-    player.turboT = TURBO_DURATION;
-  } else {
-    powerups.spawnHazard(type, player);
-  }
+  audio.pickup();
+  if (type === 'turbo') player.turboT = TURBO_DURATION;
+  else powerups.spawnHazard(type, player);
 }
 
 function onHazardHit(hazard, victim) {
+  if (gbActive() && victim === ball.carrier && victim.team === USER_TEAM) return;
   fx.hitFlash(victim.group.position.clone().setY(1), hazard.type === 'trap' ? 1.4 : 1);
+  audio.hit(0.8);
   if (hazard.type === 'trap') {
     victim.stunT = STUN_DURATION;
     fx.shake(0.18);
@@ -560,16 +837,14 @@ function onHazardHit(hazard, victim) {
   victim.velocity.set(0, 0, 0);
 }
 
-// ---- Tackle attempts ----
+// ---- Tackling -------------------------------------------------------------
 
 function tryStartTackle(defender, carrier) {
   if (play.tackle || defender.tackleCooldown > 0 || incapacitated(defender)) return;
   play.tackle = { defender, t: TACKLE_WINDOW, sprintHeld: false };
-  fx.hitFlash(
-    carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1),
-    0.9
-  );
+  fx.hitFlash(carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1), 0.9);
   hitStop(0.04);
+  audio.hit(0.7);
 }
 
 function resolveTackle() {
@@ -579,82 +854,47 @@ function resolveTackle() {
   if (!carrier) return;
 
   const isUser = carrier === controlled;
-  // A powerup turbo is a guaranteed break. Otherwise the user shrugs off a
-  // tackle only by *actively* sprinting (Shift) with stamina to spare — and
-  // each break burns stamina, so a fresh carrier can bust ~2 hits before
-  // getting dragged down. Just running into a defender = a completed tackle.
-  let breaks = carrier.turboT > 0;
-  if (!breaks && isUser && sprintHeld && stamina.tier !== TIERS.GASSED) {
+  // Gamebreaker and powerup turbo are automatic breaks. Otherwise the user
+  // has to be actively on the turbo with gas left, and it costs stamina.
+  let breaks = carrier.turboT > 0 || (gbActive() && carrier.team === USER_TEAM);
+  if (!breaks && isUser && sprintHeld && carrier.stam.tier !== TIERS.GASSED) {
     breaks = true;
-    stamina.value = Math.max(0, stamina.value - TACKLE_BREAK_COST);
+    carrier.stam.value = Math.max(0, carrier.stam.value - TACKLE_BREAK_COST);
+  }
+  if (!breaks && !isUser && carrier.team !== USER_TEAM) {
+    breaks = Math.random() < 0.22; // AI runners break the odd one
   }
 
   const contact = carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1.1);
   if (breaks) {
-    // Defender lunges past the carrier and eats turf; carrier stumbles on.
     defender.commitTarget
       .copy(defender.velocity.lengthSq() > 0.2 ? defender.velocity : carrier.velocity)
-      .normalize()
-      .multiplyScalar(2.4)
-      .add(carrier.group.position);
+      .normalize().multiplyScalar(2.6).add(carrier.group.position);
     defender.commitT = 0.35;
     defender.stumbleT = 1.0;
     defender.tackleCooldown = 1.2;
-    carrier.stumbleT = 0.45;
-    fx.hitFlash(contact, 1.3);
-    fx.shake(0.22);
+    carrier.stumbleT = gbActive() ? 0 : 0.45;
+    fx.hitFlash(contact, 1.35);
+    fx.shake(0.24);
     hitStop(0.06);
+    audio.hit(1);
+    cheer(0.55);
+    if (carrier.team === USER_TEAM) addStyle(STYLE.brokenTackle);
   } else {
-    // Completed tackle: dead ball, on returns too.
     fx.hitFlash(contact, 1.6);
     fx.shake(0.35);
     hitStop(0.08);
+    audio.hit(1.3);
+    cheer(0.4);
     if (play.intReturn !== null) endReturn('tackle', carrier.group.position.x);
     else endPlay('tackle', carrier.group.position.x);
   }
 }
 
-// ---- Per-frame AI ----
+// ---- AI -------------------------------------------------------------------
 
 const scratch = new THREE.Vector3();
-function updateReceiver(wr, speed = WR_SPEED) {
-  const route = play.routes.get(wr);
-  if (!route || !route.length) {
-    wr.velocity.set(0, 0, 0);
-    return;
-  }
-  scratch.copy(route[0]).sub(wr.group.position);
-  scratch.y = 0;
-  if (scratch.length() < 0.6 && route.length > 1) route.shift();
-  wr.velocity.copy(scratch.normalize()).multiplyScalar(speed);
-}
-
-function updateBlocker(center) {
-  const qb = offensePlayer(QB);
-  const rusher = defensePlayer(0);
-  scratch.copy(rusher.group.position).sub(qb.group.position).setLength(1.6);
-  scratch.add(qb.group.position).sub(center.group.position);
-  scratch.y = 0;
-  if (scratch.length() < 0.2) {
-    center.velocity.set(0, 0, 0);
-    return;
-  }
-  center.velocity.copy(scratch.normalize()).multiplyScalar(BLOCKER_SPEED);
-}
-
-function resolveBlocks(center) {
-  if (incapacitated(center)) return;
-  for (const d of teamPlayers(defenseTeam())) {
-    const dx = d.group.position.x - center.group.position.x;
-    const dz = d.group.position.z - center.group.position.z;
-    const dist = Math.hypot(dx, dz);
-    if (dist > 0 && dist < BLOCK_RADIUS) {
-      const push = (BLOCK_RADIUS - dist) / dist;
-      d.group.position.x += dx * push;
-      d.group.position.z += dz * push;
-    }
-  }
-}
+const scratch2 = new THREE.Vector3();
 
 function nearestOpponentDist(p) {
   let best = Infinity;
@@ -665,50 +905,168 @@ function nearestOpponentDist(p) {
   return best;
 }
 
+// Where a thrown ball will cross catching height, from its current state.
+const landing = new THREE.Vector3();
+function ballLandingSpot() {
+  const g = 20; // matches GRAVITY in ball.js
+  const { x, y, z } = ball.mesh.position;
+  const v = ball.velocity;
+  const catchY = 1.1;
+  const disc = v.y * v.y - 2 * g * (catchY - y);
+  const t = disc <= 0
+    ? Math.max(0, v.y / g) // never gets that high: use the apex
+    : (v.y + Math.sqrt(disc)) / g;
+  return landing.set(x + v.x * t, catchY, z + v.z * t);
+}
+
+function trackBall(p) {
+  const spot = ballLandingSpot();
+  scratch.set(spot.x - p.group.position.x, 0, spot.z - p.group.position.z);
+  const d = scratch.length();
+  if (d < 0.2) {
+    p.velocity.set(0, 0, 0);
+    return;
+  }
+  // Sprint to the spot, then settle under it.
+  p.velocity.copy(scratch.normalize()).multiplyScalar(d > 1 ? WR_SPEED * 1.12 : WR_SPEED * 0.5);
+}
+
+function followRoute(p, speed = WR_SPEED) {
+  const route = play.routes.get(p);
+  if (!route || !route.length) {
+    // Route finished: drift to open grass rather than standing still.
+    const attack = ATTACK_DIR[p.team];
+    scratch.set(attack * 2, 0, p.group.position.z > 0 ? 1 : -1);
+    p.velocity.copy(scratch.normalize()).multiplyScalar(speed * 0.45);
+    return;
+  }
+  scratch.set(route[0].x - p.group.position.x, 0, route[0].z - p.group.position.z);
+  if (scratch.length() < 0.7 && route.length > 1) route.shift();
+  p.velocity.copy(scratch.normalize()).multiplyScalar(speed);
+}
+
+function updateBlocker(p) {
+  // Blockers pick up the nearest threat to whoever they're protecting.
+  const a = play.off.assign[p.slot];
+  const protectee = a?.block === 'carrier' && ball.carrier ? ball.carrier : offensePlayer(SLOT.QB);
+  if (!protectee) return;
+  // Block the man in the way of where the carrier is headed.
+  let threat = null;
+  let bd = Infinity;
+  const attack = ATTACK_DIR[p.team];
+  scratch2.copy(protectee.group.position);
+  scratch2.x += attack * 4;
+  for (const d of teamPlayers(defenseTeam())) {
+    if (incapacitated(d)) continue;
+    if (d.blockedBy && d.blockedBy !== p && d.blockedBy.group.position.distanceTo(d.group.position) < 2.5) continue;
+    const dist = d.group.position.distanceTo(scratch2);
+    if (dist < bd) { bd = dist; threat = d; }
+  }
+  if (!threat) {
+    p.velocity.set(0, 0, 0);
+    return;
+  }
+  threat.blockedBy = p;
+  // Stand between the threat and the man being protected.
+  scratch.copy(threat.group.position).sub(protectee.group.position).setLength(1.5);
+  scratch.add(protectee.group.position).sub(p.group.position);
+  scratch.y = 0;
+  if (scratch.length() < 0.2) {
+    p.velocity.set(0, 0, 0);
+    return;
+  }
+  p.velocity.copy(scratch.normalize()).multiplyScalar(BLOCKER_SPEED);
+}
+
+function resolveBlocks() {
+  for (const b of play.blockers) {
+    if (incapacitated(b)) continue;
+    for (const d of teamPlayers(defenseTeam())) {
+      const dx = d.group.position.x - b.group.position.x;
+      const dz = d.group.position.z - b.group.position.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 0.001 && dist < BLOCK_RADIUS) {
+        const push = (BLOCK_RADIUS - dist) / dist;
+        d.group.position.x += dx * push;
+        d.group.position.z += dz * push;
+        d.velocity.multiplyScalar(0.55);
+      }
+    }
+  }
+}
+
 function updateAICarrier(p) {
   const attack = ATTACK_DIR[p.team];
+  // Follow the designed lane until it runs out, then read the field.
+  const route = play.routes.get(p);
+  if (route && route.length > 1) {
+    followRoute(p, SPRINT_SPEED[TIERS.REGULAR]);
+    return;
+  }
   scratch.set(attack, 0, 0);
   let nearest = null;
   let nd = Infinity;
   for (const o of players) {
     if (o.team === p.team) continue;
     const d = o.group.position.distanceTo(p.group.position);
-    if (d < nd) {
-      nd = d;
-      nearest = o;
-    }
+    if (d < nd) { nd = d; nearest = o; }
   }
-  if (nearest && nd < 3.5) {
+  if (nearest && nd < 4.5) {
     const dz = p.group.position.z - nearest.group.position.z;
-    scratch.z = (dz >= 0 ? 1 : -1) * 0.8;
+    scratch.z = (dz >= 0 ? 1 : -1) * 0.9;
+    // Hug the open sideline rather than running into the boundary.
+    if (Math.abs(p.group.position.z) > FIELD.halfWidth - 3) scratch.z = -Math.sign(p.group.position.z) * 0.9;
     scratch.normalize();
   }
   p.velocity.copy(scratch).multiplyScalar(p.turboT > 0 ? SPRINT_SPEED[TIERS.TURBO] : WR_SPEED);
 }
 
 function updateAIQuarterback(qb) {
-  if (play.qbScrambled) {
+  if (play.qbScrambling) {
     updateAICarrier(qb);
     return;
   }
-  qb.velocity.set(0, 0, 0);
+  // Slide in the pocket away from pressure.
+  const pressure = nearestOpponentDist(qb);
+  if (pressure < 3) {
+    let threat = null;
+    let bd = Infinity;
+    for (const d of teamPlayers(defenseTeam())) {
+      const dist = d.group.position.distanceTo(qb.group.position);
+      if (dist < bd) { bd = dist; threat = d; }
+    }
+    scratch.copy(qb.group.position).sub(threat.group.position);
+    scratch.y = 0;
+    qb.velocity.copy(scratch.normalize()).multiplyScalar(WALK_SPEED * 0.9);
+  } else {
+    qb.velocity.set(0, 0, 0);
+  }
   if (play.thrown || ball.carrier !== qb) return;
+
   if (play.t > QB_MIN_HOLD) {
-    const options = [...RECEIVER_SLOTS];
-    if (play.centerReleased) options.push(CENTER);
-    for (const slot of options) {
+    // Progression: throw to the most open receiver past the sticks first.
+    let best = null;
+    let bestScore = -Infinity;
+    for (const slot of TARGET_SLOTS) {
       const wr = offensePlayer(slot);
-      if (nearestOpponentDist(wr) > QB_OPEN_DIST) {
-        throwToReceiver(wr);
-        return;
-      }
+      if (!wr || incapacitated(wr)) continue;
+      const open = nearestOpponentDist(wr);
+      if (open < QB_OPEN_DIST) continue;
+      const downfield = offAttack() * (wr.group.position.x - drive.los);
+      const s = open * 1.4 + downfield * 0.55;
+      if (s > bestScore) { bestScore = s; best = wr; }
+    }
+    if (best) {
+      throwToReceiver(best, best.group.position.distanceTo(qb.group.position) > 16);
+      return;
     }
   }
-  if (play.t > QB_SCRAMBLE_AT) play.qbScrambled = true;
+  // Clock about to pop: take off and run.
+  if (play.clockRunning && play.passClock < 1.1) play.qbScrambling = true;
 }
 
 function updateDefender(d) {
-  // Sold by a juke/spin: keep charging the committed direction for a beat.
+  const job = play.coverage.get(d) || { mode: 'man' };
   if (d.commitT > 0) {
     scratch.copy(d.commitTarget).sub(d.group.position);
     scratch.y = 0;
@@ -717,207 +1075,335 @@ function updateDefender(d) {
       return;
     }
   }
-  const qb = offensePlayer(QB);
-  const carrier = ball.carrier;
   const attack = offAttack();
-  const carrierRunning =
-    carrier &&
-    (carrier.role !== 'qb' || play.qbScrambled || attack * (carrier.group.position.x - drive.los) > 0);
+  const carrier = ball.carrier;
+  const qb = offensePlayer(SLOT.QB);
+  const carrierLoose =
+    carrier && (carrier.slot !== SLOT.QB || play.qbScrambling || attack * (carrier.group.position.x - drive.los) > 0);
 
-  if (carrierRunning) {
-    scratch.copy(carrier.group.position);
-  } else if (d.role === 'rusher') {
-    if (play.t < rushDelay()) {
-      d.velocity.set(0, 0, 0);
+  // Everyone converges once the ball is loose — on a reaction delay, and on
+  // an angle, so there's an actual running lane to find.
+  if (carrierLoose && shouldPursue(d, carrier)) {
+    pursueCarrier(d, carrier);
+    return;
+  }
+  if (ball.state === 'thrown' && ball.intended && play.t - play.lastThrowAt > 0.12) {
+    const dist = d.group.position.distanceTo(ball.intended.group.position);
+    if (dist < 12 || job.target === ball.intended) {
+      pursue(d, ball.intended.group.position);
       return;
     }
-    scratch.copy(qb.group.position);
-  } else if (d.role === 'spy') {
-    const center = play.assignments.get(d);
-    if (play.centerReleased) {
-      scratch.copy(center.group.position);
-      scratch.x += attack * 0.9;
-    } else {
-      scratch.set(drive.los + attack * 4.5, 0, 0);
-    }
-  } else {
-    const man = play.assignments.get(d);
-    scratch.copy(man.group.position);
-    scratch.x += attack * 0.9;
   }
-  scratch.sub(d.group.position);
-  scratch.y = 0;
-  if (scratch.length() < 0.3) {
+
+  if (job.mode === 'rush') {
+    if (play.t < play.def.rushAt) {
+      // Hold the edge until the count is up.
+      scratch.set(drive.los + attack * 1.4, 0, d.group.position.z);
+      pursue(d, scratch, DEF_SPEED * 0.5);
+      return;
+    }
+    pursue(d, qb.group.position);
+    return;
+  }
+  if (job.mode === 'spy') {
+    // A spy contains: he mirrors the ball across the field but holds his own
+    // side of the line until it crosses. He is not a free rusher — walking
+    // him into the backfield turned RUN CONTAIN into a two-man sack party.
+    const mark = carrier ?? qb;
+    const markPast = attack * (mark.group.position.x - drive.los) > 0;
+    scratch.set(
+      markPast ? mark.group.position.x : drive.los + attack * 2.0,
+      0,
+      mark.group.position.z
+    );
+    pursue(d, scratch, DEF_SPEED * 0.92);
+    return;
+  }
+  if (job.mode === 'zone') {
+    scratch.set(drive.los + attack * job.spot[0], 0, job.spot[1] * attack);
+    // Break on any receiver who shows up in the zone.
+    let intruder = null;
+    let bd = 6.5;
+    for (const slot of TARGET_SLOTS) {
+      const wr = offensePlayer(slot);
+      if (!wr) continue;
+      const dist = wr.group.position.distanceTo(scratch);
+      if (dist < bd) { bd = dist; intruder = wr; }
+    }
+    pursue(d, intruder ? intruder.group.position : scratch);
+    return;
+  }
+  if (job.mode === 'free') {
+    // Free safety: sit on top of the deepest receiver.
+    let deepest = null;
+    let best = -Infinity;
+    for (const slot of TARGET_SLOTS) {
+      const wr = offensePlayer(slot);
+      if (!wr) continue;
+      const depth = attack * (wr.group.position.x - drive.los);
+      if (depth > best) { best = depth; deepest = wr; }
+    }
+    scratch.copy(deepest ? deepest.group.position : qb.group.position);
+    scratch.x += attack * 5;
+    pursue(d, scratch);
+    return;
+  }
+  // Man: trail the receiver, a step toward your own goal.
+  const man = job.target;
+  if (!man) {
+    pursue(d, qb.group.position);
+    return;
+  }
+  scratch.copy(man.group.position);
+  scratch.x += attack * 1.0;
+  scratch.addScaledVector(man.velocity, 0.12); // jump the route a little
+  pursue(d, scratch);
+}
+
+// Chase the carrier where he's going to be, not where he is. Without this
+// every defender runs at his current spot and the whole pile collapses on
+// the handoff, which is what made designed runs unplayable.
+const leadPos = new THREE.Vector3();
+function pursueCarrier(d, carrier, speed = DEF_SPEED) {
+  const gap = d.group.position.distanceTo(carrier.group.position);
+  const lead = THREE.MathUtils.clamp(gap / (speed * 2.2), 0, 0.55);
+  leadPos.copy(carrier.group.position).addScaledVector(carrier.velocity, lead);
+  leadPos.z = THREE.MathUtils.clamp(leadPos.z, -FIELD.halfWidth, FIELD.halfWidth);
+  pursue(d, leadPos, speed);
+}
+
+// A coverage defender doesn't abandon his man the instant the ball moves:
+// he needs the carrier to cross the line, get close, or beat the clock.
+function shouldPursue(d, carrier) {
+  const job = play.coverage.get(d);
+  if (job?.mode === 'rush' || job?.mode === 'spy') return true;
+  const attack = offAttack();
+  if (attack * (carrier.group.position.x - drive.los) > -0.5) return true;
+  if (job?.mode === 'free') return false; // safety stays on top
+  const gap = d.group.position.distanceTo(carrier.group.position);
+  return gap < 9 && play.t > (play.handoffAt ?? 0) + 0.4;
+}
+
+function pursue(d, targetPos, speed = DEF_SPEED) {
+  scratch2.copy(targetPos).sub(d.group.position);
+  scratch2.y = 0;
+  if (scratch2.length() < 0.25) {
     d.velocity.set(0, 0, 0);
     return;
   }
-  const speed = d.stumbleT > 0 ? DEF_SPEED * 0.45 : DEF_SPEED;
-  d.velocity.copy(scratch.normalize()).multiplyScalar(speed);
+  const s = d.stumbleT > 0 ? speed * 0.45 : speed;
+  d.velocity.copy(scratch2.normalize()).multiplyScalar(s);
 }
 
-// ---- User control ----
+// ---- User movement --------------------------------------------------------
 
 const moveDir = new THREE.Vector3();
-function updateControlled(dt) {
-  const attack = viewAttack(); // arrow frame matches the camera
+
+function stickLateral() {
+  if (touch.stick.x > 0.35) return 1;
+  if (touch.stick.x < -0.35) return -1;
+  if (keys.has('arrowright') || keys.has('d')) return 1;
+  if (keys.has('arrowleft') || keys.has('a')) return -1;
+  return 0;
+}
+
+function readMoveInput(attack) {
   moveDir.set(0, 0, 0);
-  if (keys.has('arrowup')) moveDir.x += attack;
-  if (keys.has('arrowdown')) moveDir.x -= attack;
+  // The stick and the arrows are both read in camera space: up is downfield.
+  if (touch.stick.active) {
+    moveDir.x += -touch.stick.y * attack;
+    moveDir.z += touch.stick.x * attack;
+  }
+  if (keys.has('arrowup') || keys.has('w')) moveDir.x += attack;
+  if (keys.has('arrowdown') || keys.has('s')) moveDir.x -= attack;
   if (keys.has('arrowleft')) moveDir.z -= attack;
   if (keys.has('arrowright')) moveDir.z += attack;
+  if (moveDir.lengthSq() > 1) moveDir.normalize();
+  return moveDir;
+}
+
+function updateControlled(dt) {
+  if (!controlled) return TIERS.REGULAR;
+  const attack = viewAttack();
+  const dir = readMoveInput(attack);
 
   const canMove =
     phase === 'live' &&
-    !(play.snapping && controlled.role === 'qb') &&
+    !(play.snapping && controlled.slot === SLOT.QB && controlled.team === drive.offense) &&
     !incapacitated(controlled) &&
     !controlled.moveState;
-  const moving = moveDir.lengthSq() > 0 && canMove;
-  const sprinting = moving && keys.has('shift') && controlled.turboT <= 0;
-  let tier = stamina.update(dt, sprinting);
-  if (controlled.turboT > 0) tier = TIERS.TURBO; // powerup: free turbo
+  const moving = dir.lengthSq() > 0.0001 && canMove;
+  const wantSprint = keys.has('shift') || touch.sprintHeld;
+  const sprinting = moving && wantSprint && controlled.turboT <= 0 && !gbActive();
+  const tier = controlled.stam.update(dt, sprinting);
 
   let speed;
-  if (controlled.turboT > 0) speed = SPRINT_SPEED[TIERS.TURBO];
+  if (gbActive() && controlled.team === USER_TEAM) speed = SPRINT_SPEED[TIERS.TURBO] * 1.15;
+  else if (controlled.turboT > 0) speed = SPRINT_SPEED[TIERS.TURBO];
   else speed = sprinting ? SPRINT_SPEED[tier] : WALK_SPEED;
+  speed *= world?.surface.grip ?? 1;
   if (controlled.stumbleT > 0) speed *= 0.6;
   if (controlled.burstT > 0) speed *= 1.3;
-  if (play.tackle && ball.carrier === controlled) speed *= TACKLE_DRAG;
+  if (play.tackle && ball.carrier === controlled && !gbActive()) speed *= TACKLE_DRAG;
 
   if (moving) {
-    moveDir.normalize();
-    controlled.velocity.copy(moveDir).multiplyScalar(speed);
-  } else if (canMove) {
-    controlled.velocity.set(0, 0, 0);
-  }
-  return tier;
+    // Analog on a thumbstick, but full speed by ~80% deflection — squaring
+    // the magnitude (which copy+scale-by-length does) feels like mud.
+    const mag = THREE.MathUtils.clamp(dir.length() * 1.25, 0, 1);
+    controlled.velocity.copy(dir).normalize().multiplyScalar(speed * mag);
+  } else if (canMove) controlled.velocity.set(0, 0, 0);
+  return controlled.turboT > 0 || gbActive() ? TIERS.TURBO : tier;
 }
 
-function updateHUD(tier) {
-  staminaFill.style.width = `${stamina.percent}%`;
-  staminaFill.style.backgroundColor = TIER_COLORS[tier];
-  const turbo = controlled && controlled.turboT > 0;
-  if (turbo) staminaFill.style.backgroundColor = '#d4f00f';
-  staminaLabel.textContent = turbo
-    ? `TURBO BOOST — ${controlled.turboT.toFixed(1)}s`
-    : `${tier.toUpperCase()} — ${Math.round(stamina.value)} / ${stamina.max}`;
-}
-
-// ---- Live-play resolution ----
+// ---- Live play ------------------------------------------------------------
 
 function updateLivePlay(dt) {
   play.t += dt;
   intLockout = Math.max(0, intLockout - dt);
+  meta.clock = Math.max(0, meta.clock - dt);
 
   const attack = offAttack();
-  const qb = offensePlayer(QB);
-  const center = offensePlayer(CENTER);
+  const qb = offensePlayer(SLOT.QB);
 
-  if (
-    !play.centerReleased &&
-    CENTER_RELEASES_ON_DOWN(drive.down) &&
-    play.t > CENTER_RELEASE_AT
-  ) {
-    play.centerReleased = true;
-    play.routes.set(center, makeCenterRoute(center, attack));
+  // Pass clock: 7-on-7's answer to a pass rush. Crossing the line turns the
+  // play into a run, so the clock stops rather than charging a phantom sack.
+  if (play.clockRunning && ball.carrier === qb && !play.thrown) {
+    if (attack * (qb.group.position.x - drive.los) > 0.5) {
+      play.clockRunning = false;
+      play.qbScrambling = true;
+    } else {
+      play.passClock -= dt;
+      if (play.passClock <= 0) {
+        endPlay('sack', qb.group.position.x);
+        return;
+      }
+    }
+  }
+
+  // Automatic handoff / pitch on a designed run.
+  if (!play.handoffDone && play.carrierSlot != null && play.off.handoff != null) {
+    if (play.t >= play.off.handoff && ball.carrier === qb) {
+      const back = offensePlayer(play.carrierSlot);
+      if (back && back !== qb) {
+        holdBall(ball, back);
+        audio.catchBall();
+        if (back.team === USER_TEAM) setControlled(back);
+        touch.setMode(userOnOffense() ? 'carry' : 'defense');
+      } else if (back === qb) {
+        touch.setMode(userOnOffense() ? 'carry' : 'defense');
+      }
+      play.handoffDone = true;
+      play.handoffAt = play.t;
+      play.snapping = false;
+    }
   }
 
   if (play.intReturn !== null) {
-    // Interception return: the throwing team chases the returner; the
-    // returner's teammates escort downfield.
     const carrier = ball.carrier;
     const retAttack = ATTACK_DIR[play.intReturn];
     for (const p of players) {
       if (p === controlled || incapacitated(p) || p.moveState || !carrier) continue;
-      if (p.team !== play.intReturn) {
-        scratch.copy(carrier.group.position).sub(p.group.position);
-        scratch.y = 0;
-        if (scratch.length() > 0.3) {
-          const speed = p.stumbleT > 0 ? DEF_SPEED * 0.45 : DEF_SPEED;
-          p.velocity.copy(scratch.normalize()).multiplyScalar(speed);
-        } else {
-          p.velocity.set(0, 0, 0);
-        }
-      } else if (p !== carrier) {
-        scratch.set(
-          carrier.group.position.x + retAttack * 4,
-          0,
-          p.group.position.z
-        ).sub(p.group.position);
-        scratch.y = 0;
-        p.velocity.copy(scratch.length() > 0.5 ? scratch.normalize().multiplyScalar(DEF_SPEED * 0.9) : scratch.set(0, 0, 0));
+      if (p === carrier) {
+        updateAICarrier(p);
+      } else if (p.team !== play.intReturn) {
+        pursueCarrier(p, carrier);
+      } else {
+        scratch.set(carrier.group.position.x + retAttack * 5, 0, p.group.position.z);
+        pursue(p, scratch, DEF_SPEED * 0.9);
       }
     }
   } else {
-    // Offense AI
-    for (const slot of [...RECEIVER_SLOTS, CENTER]) {
-      const p = offensePlayer(slot);
+    for (const p of teamPlayers(drive.offense)) {
       if (p === controlled || incapacitated(p) || p.moveState) continue;
       if (ball.carrier === p) {
-        if (p.team === TEAM.RED) updateAICarrier(p);
-      } else if (slot === CENTER && !play.centerReleased) {
+        if (p.slot === SLOT.QB && !play.qbScrambling && !play.handoffDone) updateAIQuarterback(p);
+        else updateAICarrier(p);
+      } else if (p.slot === SLOT.QB) {
+        updateAIQuarterback(p);
+      } else if (ball.state === 'thrown' && ball.intended === p && !play.snapping) {
+        trackBall(p);
+      } else if (play.blockers.has(p)) {
         updateBlocker(p);
       } else {
-        updateReceiver(p);
+        followRoute(p);
       }
     }
-    if (qb !== controlled && !incapacitated(qb)) updateAIQuarterback(qb);
-
-    // Defense AI
     for (const d of teamPlayers(defenseTeam())) {
-      if (d === controlled || incapacitated(d)) continue;
+      if (d === controlled || incapacitated(d) || d.moveState) continue;
       updateDefender(d);
     }
   }
 
-  // Tackle window
+  // Tackle window: the grab, then the resolve.
   if (play.tackle) {
     play.tackle.t -= dt;
-    play.tackle.sprintHeld ||= keys.has('shift');
+    play.tackle.sprintHeld ||= keys.has('shift') || touch.sprintHeld;
     const d = play.tackle.defender;
     if (ball.carrier) {
-      // grabber sticks to the carrier
-      scratch.copy(ball.carrier.group.position).sub(d.group.position);
-      scratch.y = 0;
-      d.velocity.copy(scratch.normalize()).multiplyScalar(DEF_SPEED);
-      if (ball.carrier.team === TEAM.RED) ball.carrier.velocity.multiplyScalar(TACKLE_DRAG);
+      pursue(d, ball.carrier.group.position, DEF_SPEED);
+      if (ball.carrier !== controlled && !gbActive()) ball.carrier.velocity.multiplyScalar(TACKLE_DRAG);
     }
     if (play.tackle && play.tackle.t <= 0) resolveTackle();
   }
 
-  // Thrown ball: catch or incompletion.
+  // Ball in the air.
   if (ball.state === 'thrown') {
     const wr = ball.intended;
     scratch.copy(wr.group.position);
     scratch.y = 1.1;
-    if (ball.airTime > 0.1 && ball.mesh.position.distanceTo(scratch) < CATCH_DIST) {
+    const reach = wr.diveT > 0 ? DIVE_CATCH_DIST : CATCH_DIST;
+    // Hand control to the receiver late so the user can adjust to the ball.
+    if (
+      !play.snapping && wr.team === USER_TEAM && wr !== controlled &&
+      ball.mesh.position.distanceTo(scratch) < 9
+    ) {
+      setControlled(wr);
+      touch.setMode('carry');
+    }
+    if (ball.airTime > 0.1 && ball.mesh.position.distanceTo(scratch) < reach) {
       holdBall(ball, wr);
+      if (!play.snapping) {
+        audio.catchBall();
+        cheer(0.5);
+        if (wr.team === USER_TEAM) addStyle(STYLE.completion);
+        ui.hud.toast(wr.diveT > 0 ? 'DIVING GRAB!' : 'CAUGHT');
+      }
       play.snapping = false;
-      if (wr.team === TEAM.BLUE && wr !== controlled) setControlled(wr);
-    } else if (ball.mesh.position.y < 0.18) {
-      endPlay('incomplete', drive.los);
+      if (wr.team === USER_TEAM && wr !== controlled) setControlled(wr);
+      touch.setMode(userOnOffense() ? 'carry' : 'defense');
+    } else if (ball.mesh.position.y < 0.2) {
+      if (play.intReturn !== null) endReturn('tackle', ball.mesh.position.x);
+      else endPlay('incomplete', drive.los);
       return;
     }
   }
 
-  // Carrier: touchdown, out of bounds, new tackle attempts. During a return
-  // these resolve for the returning team instead of the offense.
+  // Carrier: scoring, boundaries, new contact.
   const carrier = ball.carrier;
-  if (carrier) {
+  if (carrier && !play.snapping) {
     const returning = play.intReturn !== null;
-    const carrierAttack = returning ? ATTACK_DIR[carrier.team] : attack;
+    const carrierTeam = returning ? carrier.team : drive.offense;
+    const carrierAttack = ATTACK_DIR[carrierTeam];
     const cx = carrier.group.position.x;
     if (carrierAttack * cx >= FIELD.halfLength) {
-      touchdownFor(returning ? carrier.team : drive.offense);
+      if (conversion && !returning) {
+        freezePlay();
+        showBanner('CONVERSION GOOD!', `+${conversion.points}`);
+        audio.touchdown();
+        afterConversion(true);
+      } else {
+        touchdownFor(carrierTeam);
+      }
       return;
     }
-    if (Math.abs(carrier.group.position.z) > FIELD.halfWidth - 0.2) {
+    if (Math.abs(carrier.group.position.z) > FIELD.halfWidth - 0.25) {
       if (returning) endReturn('oob', cx);
       else endPlay('oob', cx);
       return;
     }
     if (!play.tackle) {
       for (const d of players) {
-        if (d.team === carrier.team) continue;
+        if (d.team === carrier.team || incapacitated(d)) continue;
         if (d.group.position.distanceTo(carrier.group.position) < TACKLE_DIST) {
           tryStartTackle(d, carrier);
           break;
@@ -927,19 +1413,61 @@ function updateLivePlay(dt) {
   }
 }
 
-// ---- Boot ----
+// ---- HUD ------------------------------------------------------------------
 
-loadPlayerAssets().then((assets) => {
-  for (const team of [TEAM.BLUE, TEAM.RED]) {
+function refreshHUD() {
+  ui.hud.setScore(score[TEAM.HOME], score[TEAM.AWAY]);
+  ui.hud.setClock(clockText(meta.clock));
+  const toGo = drive.goalToGo ? 'GOAL' : toGoYards();
+  const label = conversion?.points
+    ? `${conversion.points}-POINT TRY`
+    : `${['1ST', '2ND', '3RD', '4TH'][drive.down - 1]} & ${toGo} · ${ballOnText()}`;
+  ui.hud.setDown(`${TEAM_NAMES[drive.offense]} BALL · ${label}`);
+}
+
+function updateTargets() {
+  if (!userOnOffense()) {
+    touch.setTargets([]);
+    for (const p of teamPlayers(USER_TEAM)) if (p.icon) p.icon.visible = false;
+    return;
+  }
+  const live =
+    phase === 'live' && !play.thrown && ball.carrier?.team === drive.offense &&
+    (ball.carrier.slot === SLOT.QB || play.off?.keepPass) &&
+    offAttack() * (ball.carrier.group.position.x - drive.los) <= 0.5;
+  touch.setTargets(
+    TARGET_SLOTS.map((slot) => {
+      const p = offensePlayer(slot);
+      const open = p ? nearestOpponentDist(p) : 0;
+      return {
+        slot,
+        letter: TARGET_LETTERS[slot],
+        live: live && !!p,
+        tag: live && open > QB_OPEN_DIST ? 'OPEN' : '',
+      };
+    })
+  );
+  for (const p of teamPlayers(USER_TEAM)) {
+    if (!p.icon) continue;
+    p.icon.visible = live && TARGET_SLOTS.includes(p.slot) && p !== ball.carrier;
+  }
+}
+
+// ---- Boot -----------------------------------------------------------------
+
+function buildTeams() {
+  for (const team of [TEAM.HOME, TEAM.AWAY]) {
     for (let slot = 0; slot < ROSTER_SIZE; slot++) {
       const p = createPlayer(assets, {
         team,
         color: TEAM_COLORS[team],
-        redJersey: team === TEAM.RED,
-        iconLetter: team === TEAM.BLUE ? ICON_LETTERS[slot] ?? null : null,
+        redJersey: team === TEAM.AWAY,
+        iconLetter: team === USER_TEAM ? TARGET_LETTERS[slot] ?? null : null,
       });
       p.slot = slot;
-      p.role = 'wr';
+      p.stam = new StaminaMeter({ regularBelow: 60, gassedBelow: 25 });
+      p.diveT = 0;
+      p.blockedBy = null;
       p.currentAction = p.actions[TIERS.REGULAR];
       p.currentAction.play();
       p.currentAction.paused = true;
@@ -947,72 +1475,139 @@ loadPlayerAssets().then((assets) => {
       scene.add(p.group);
     }
   }
+}
+
+function newGame(surfaceKey, options) {
+  meta.options = options;
+  meta.clock = GAME_SECONDS;
+  meta.over = false;
+  score[TEAM.HOME] = 0;
+  score[TEAM.AWAY] = 0;
+  style.value = 0;
+  style.active = 0;
+  conversion = null;
+  audio.setMuted(!options.sound);
+  if (options.sound) audio.start();
+  powerups.setEnabled?.(options.pickups);
+  if (!world || world.surface.key !== surfaceKey) setSurface(surfaceKey);
+  ui.showGame();
+  ui.hud.setKeys(
+    'ARROWS move · SHIFT turbo · SPACE snap · A S D F G throw (hold = lob) · Z spin · X juke · C truck · E dive/pick · Q switch · V gamebreaker'
+  );
+  startDrive(TEAM.HOME, -ATTACK_DIR[TEAM.HOME] * (FIELD.halfLength - START_FROM_OWN));
+  toPlayCall();
+}
+
+ui.handlers.onStart = (surfaceKey, options) => {
+  audio.start();
+  audio.uiTap();
+  newGame(surfaceKey, options);
+};
+ui.handlers.onRestart = () => {
+  ui.showTitle();
+  phase = 'menu';
+  touch.setMode('menu');
+};
+ui.handlers.onSurfacePreview = (key) => {
+  if (phase === 'menu' || phase === 'loading') setSurface(key);
+};
+ui.handlers.onToggle = (key, value) => {
+  if (key === 'sound') audio.setMuted(!value);
+  if (key === 'pickups') powerups.setEnabled?.(value);
+};
+
+setSurface('concrete');
+loadPlayerAssets().then((loaded) => {
+  assets = loaded;
+  buildTeams();
+  phase = 'menu';
+  ui.showTitle();
+  touch.setMode('menu');
+  const boot = document.querySelector('#boot');
+  boot?.classList.add('gone');
+  setTimeout(() => boot?.remove(), 500);
   window.__game = {
-    players,
-    ball,
-    drive,
-    score,
-    snap,
-    play,
-    powerups,
-    stamina,
-    renderer,
-    scene,
-    camera,
-    step,
+    players, ball, drive, score, meta, play, style, powerups, renderer, scene, camera,
+    snap, newGame, step,
     get phase() { return phase; },
     get controlled() { return controlled; },
+    get world() { return world; },
   };
-  lineupPlay();
 });
 
-window.addEventListener('resize', () => {
+// A landscape phone is very wide and very short: the fixed vertical FOV
+// would bury the action at the bottom of the frame, so pull back and up.
+let camScale = 1;
+function fitCamera() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
+  camScale = THREE.MathUtils.clamp(camera.aspect / 1.6, 1, 1.2);
   renderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
-});
+}
+fitCamera();
+window.addEventListener('resize', fitCamera);
+window.addEventListener('orientationchange', () => setTimeout(fitCamera, 150));
 
-const BOUND_X = FIELD.halfLength + FIELD.endZoneDepth - 0.5;
-const BOUND_Z = FIELD.halfWidth + FIELD.fenceMargin - 0.5;
+// ---- Frame ----------------------------------------------------------------
 
-const camPos = new THREE.Vector3(-20, 8, 0);
+const BOUND_X = FIELD.halfLength + FIELD.endZoneDepth - 0.6;
+const BOUND_Z = FIELD.halfWidth + FIELD.fenceMargin - 1;
+
+const camPos = new THREE.Vector3(-24, 9, 0);
 const camLook = new THREE.Vector3(0, 0, 0);
 const desiredPos = new THREE.Vector3();
 const desiredLook = new THREE.Vector3();
 const reachTarget = new THREE.Vector3();
+const sep = new THREE.Vector3();
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => step(Math.min(clock.getDelta(), 0.05)));
 
 function step(dt) {
-  if (phase === 'loading') return;
-
-  // Hit-stop: freeze the world for a few frames, keep rendering.
+  if (phase === 'loading') {
+    composer.render();
+    return;
+  }
   if (hitStopT > 0) {
     hitStopT -= dt;
+    world?.crowd.update(dt * 0.2);
     composer.render();
     return;
   }
 
-  const tier = updateControlled(dt);
+  const tier = phase === 'live' ? updateControlled(dt) : TIERS.REGULAR;
 
   if (phase === 'lineup') {
     lineupTimer += dt;
-    if (drive.offense === TEAM.RED && lineupTimer > AI_SNAP_DELAY) snap();
+    if (!userOnOffense() && lineupTimer > AI_SNAP_DELAY) snap();
   } else if (phase === 'live') {
     updateLivePlay(dt);
   } else if (phase === 'dead') {
     deadTimer -= dt;
     for (const p of players) p.velocity.set(0, 0, 0);
     if (deadTimer <= 0) {
-      bannerEl.style.display = 'none';
-      lineupPlay();
+      ui.hud.hideBanner();
+      if (meta.clock <= 0 && !conversion) {
+        endGame();
+      } else if (conversion && conversion.points === null) {
+        // Score happened: pick the try. AI goes for 2 when it's chasing.
+        if (conversion.team === USER_TEAM) askConversion();
+        else startConversion(score[conversion.team] < score[USER_TEAM] ? 2 : 1);
+      } else {
+        toPlayCall();
+      }
     }
   }
 
+  // Gamebreaker burn-down.
+  if (style.active > 0) {
+    style.active = Math.max(0, style.active - dt);
+    bloomPass.strength = 0.4 + 0.7 * Math.min(1, style.active / GB_DURATION);
+    if (style.active === 0) bloomPass.strength = 0.4;
+  }
+
   for (const p of players) {
-    // status timers
     p.turboT = Math.max(0, p.turboT - dt);
     p.stunT = Math.max(0, p.stunT - dt);
     p.slipT = Math.max(0, p.slipT - dt);
@@ -1021,22 +1616,22 @@ function step(dt) {
     p.tackleCooldown = Math.max(0, p.tackleCooldown - dt);
     p.moveCooldown = Math.max(0, p.moveCooldown - dt);
     p.burstT = Math.max(0, p.burstT - dt);
+    p.diveT = Math.max(0, p.diveT - dt);
+    if (p !== controlled) p.stam.update(dt, p.velocity.lengthSq() > 45);
     if (incapacitated(p)) p.velocity.set(0, 0, 0);
 
-    // spin/juke overlay: velocity + model rotation through the move
     if (p.moveState) {
       const m = p.moveState;
       m.t += dt;
       const k = m.t / m.dur;
+      const fwd = scratch.set(Math.sin(p.heading), 0, Math.cos(p.heading));
       if (m.type === 'spin') {
-        p.velocity.set(Math.sin(p.heading), 0, Math.cos(p.heading)).multiplyScalar(
-          SPRINT_SPEED[TIERS.TURBO] * 0.95
-        );
+        p.velocity.copy(fwd).multiplyScalar(SPRINT_SPEED[TIERS.TURBO] * 0.95);
+      } else if (m.type === 'truck') {
+        p.velocity.copy(fwd).multiplyScalar(SPRINT_SPEED[TIERS.TURBO] * 1.05);
       } else {
-        p.velocity
-          .set(Math.sin(p.heading), 0, Math.cos(p.heading))
-          .multiplyScalar(WALK_SPEED * 0.7);
-        p.velocity.z += m.dir * 8.5 * Math.sin(Math.PI * Math.min(k, 1));
+        p.velocity.copy(fwd).multiplyScalar(WALK_SPEED * 0.7);
+        p.velocity.z += m.dir * 9 * Math.sin(Math.PI * Math.min(k, 1));
       }
       if (m.t >= m.dur) {
         p.moveState = null;
@@ -1057,7 +1652,6 @@ function step(dt) {
       delta = Math.atan2(Math.sin(delta), Math.cos(delta));
       p.heading += THREE.MathUtils.clamp(delta, -TURN_RATE * dt, TURN_RATE * dt);
     }
-    // model rotation: spin adds a full 360 through the move; juke leans
     if (p.moveState?.type === 'spin') {
       p.group.rotation.y = p.heading + (p.moveState.t / p.moveState.dur) * Math.PI * 2;
     } else {
@@ -1066,17 +1660,18 @@ function step(dt) {
     p.rig.rotation.z = p.moveState?.type === 'juke'
       ? -p.moveState.dir * 0.35 * Math.sin(Math.PI * Math.min(p.moveState.t / p.moveState.dur, 1))
       : 0;
-    // slip/stumble: pitch the model forward briefly
     let pitch = 0;
     if (p.slipT > 0) pitch = 0.8 * Math.sin(Math.PI * (1 - p.slipT / SLIP_DURATION));
     else if (p.stumbleT > 0) pitch = 0.35 * Math.sin(Math.PI * (1 - p.stumbleT / 1.0));
+    else if (p.diveT > 0) pitch = 0.5;
+    else if (p.moveState?.type === 'truck') pitch = 0.3;
     p.rig.rotation.x = pitch;
 
-    const clipTier = p === controlled ? tier : p.turboT > 0 ? TIERS.TURBO : TIERS.REGULAR;
+    const clipTier =
+      p === controlled ? tier : p.turboT > 0 ? TIERS.TURBO : p.stam.tier;
     updatePlayerClip(p, clipTier, p.stunT > 0 ? 0 : speed);
     p.mixer.update(dt);
 
-    // procedural catch reach: arms track the incoming ball
     if (ball.state === 'thrown' && ball.intended === p) {
       const d = ball.mesh.position.distanceTo(p.group.position);
       const reach = THREE.MathUtils.clamp(1.4 - d / 3.5, 0, 1);
@@ -1088,39 +1683,151 @@ function step(dt) {
     }
   }
 
-  if (phase === 'live' && !play.centerReleased) {
-    resolveBlocks(offensePlayer(CENTER));
-  }
+  // Keep bodies out of each other so a pile doesn't become one player.
   if (phase === 'live') {
-    powerups.update(dt, players, { onPickup, onHazardHit });
+    for (let i = 0; i < players.length; i++) {
+      for (let j = i + 1; j < players.length; j++) {
+        const a = players[i].group.position;
+        const b = players[j].group.position;
+        sep.set(b.x - a.x, 0, b.z - a.z);
+        const d = sep.length();
+        if (d > 0.001 && d < SEPARATION) {
+          sep.multiplyScalar(((SEPARATION - d) / d) * 0.5);
+          a.sub(sep);
+          b.add(sep);
+        }
+      }
+    }
+    resolveBlocks();
+    if (meta.options.pickups) powerups.update(dt, players, { onPickup, onHazardHit });
   }
 
   updateBall(ball, dt);
-  updateHUD(tier);
-  updateIcons();
-  updateTargetChips();
+  updateTargets();
+  refreshHUD();
 
-  if (pickupMsgT > 0) {
-    pickupMsgT -= dt;
-    if (pickupMsgT <= 0.6) pickupEl.style.opacity = String(Math.max(pickupMsgT / 0.6, 0));
+  // Stamina + style meters.
+  if (controlled) {
+    const st = controlled.stam;
+    const gb = gbActive();
+    ui.hud.setStamina(
+      st.percent,
+      gb ? '#ffd54a' : controlled.turboT > 0 ? '#d4f00f'
+        : st.tier === TIERS.TURBO ? '#22c55e' : st.tier === TIERS.REGULAR ? '#eab308' : '#ef4444',
+      gb ? `GAMEBREAKER ${style.active.toFixed(1)}s`
+        : controlled.turboT > 0 ? `TURBO BOOST ${controlled.turboT.toFixed(1)}s`
+          : `${st.tier.toUpperCase()} ${Math.round(st.value)}`
+    );
   }
-  // Transient banner (INTERCEPTED!) hides itself while play continues.
-  if (bannerT > 0 && phase === 'live') {
+  ui.hud.setStyle(
+    (style.value / STYLE_MAX) * 100,
+    style.value >= STYLE_MAX,
+    style.value >= STYLE_MAX ? 'GAMEBREAKER READY — V / BUTTON' : 'STYLE'
+  );
+  touch.setGamebreaker?.(style.value >= STYLE_MAX && phase === 'live' && !gbActive());
+  ui.hud.setPassClock(
+    phase === 'live' && play.clockRunning && !play.thrown ? play.passClock / PASS_CLOCK : null
+  );
+  ui.hud.tick(dt);
+
+  if (bannerT > 0) {
     bannerT -= dt;
-    if (bannerT <= 0) bannerEl.style.display = 'none';
+    if (bannerT <= 0 && phase === 'live') ui.hud.hideBanner();
   }
 
-  const attack = viewAttack(); // swings 180° on an interception return
+  // Crowd reacts to the moment, and the audio follows the crowd.
+  const crowd = world?.crowd;
+  if (crowd) {
+    if (phase === 'live' && ball.carrier) {
+      const attack = ATTACK_DIR[play.intReturn ?? drive.offense];
+      const toGoal = FIELD.halfLength - attack * ball.carrier.group.position.x;
+      if (toGoal < 12) crowd.cheer(dt * 1.4); // getting close, they stand up
+    }
+    crowd.update(dt);
+    audio.setExcitement(crowd.excitement);
+  }
+
+  const attack = viewAttack();
   const bp = ball.mesh.position;
-  desiredPos.set(bp.x - attack * CAM_BACK, CAM_HEIGHT, bp.z + CAM_SIDE);
-  desiredLook.set(bp.x + attack * CAM_LOOKAHEAD, 1, bp.z);
-  const k = 1 - Math.exp(-CAM_SMOOTHING * dt);
+  const shot = phase === 'playcall' || phase === 'menu';
+  if (shot) {
+    // Slow orbit over the field behind the menus.
+    const a = clock.elapsedTime * 0.12;
+    desiredPos.set(Math.cos(a) * 34, 15, Math.sin(a) * 34);
+    desiredLook.set(0, 1.5, 0);
+  } else {
+    desiredPos.set(
+      bp.x - attack * CAM_BACK * camScale,
+      CAM_HEIGHT * camScale,
+      bp.z + CAM_SIDE
+    );
+    desiredLook.set(bp.x + attack * CAM_LOOKAHEAD * camScale, 1.2, bp.z);
+  }
+  const k = 1 - Math.exp(-(shot ? 1.4 : CAM_SMOOTHING) * dt);
   camPos.lerp(desiredPos, k);
   camLook.lerp(desiredLook, k);
   camera.position.copy(camPos);
   camera.lookAt(camLook);
-  camera.rotateZ(CAM_ROLL);
-  fx.update(dt); // flashes + camera shake (after camera placement)
+  if (!shot) camera.rotateZ(CAM_ROLL);
+  fx.update(dt);
 
   composer.render();
+}
+
+// ---- Conversions + game over ---------------------------------------------
+
+function askConversion() {
+  phase = 'convert';
+  // Never leave the game sitting on a prompt: the try clock runs down and
+  // defaults to the single point, the way a play clock would.
+  let left = 8;
+  const paint = () =>
+    ui.hud.banner('EXTRA POINT?', `1 FROM THE 5  ·  2 FROM THE 10  ·  ${Math.ceil(left)}s`);
+  paint();
+  const countdown = setInterval(() => {
+    left -= 1;
+    if (left <= 0) pick(1);
+    else paint();
+  }, 1000);
+  const pick = (points) => {
+    clearInterval(countdown);
+    ui.hud.hideBanner();
+    window.removeEventListener('keydown', onKey);
+    touchPick.forEach((fn) => fn());
+    startConversion(points);
+  };
+  const onKey = (e) => {
+    if (e.key === '1') pick(1);
+    if (e.key === '2') pick(2);
+  };
+  window.addEventListener('keydown', onKey);
+  // Touch: two taps on the banner halves.
+  const touchPick = [];
+  const makeBtn = (label, points, left) => {
+    const b = document.createElement('div');
+    b.textContent = label;
+    b.style.cssText = `position:fixed;z-index:50;top:52%;${left ? 'left:28%' : 'left:62%'};
+      transform:translateX(-50%);padding:14px 26px;border-radius:999px;background:#b9f227;color:#10130f;
+      font:900 16px system-ui;letter-spacing:1px;box-shadow:0 6px 20px rgba(0,0,0,0.5)`;
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      pick(points);
+    });
+    document.body.appendChild(b);
+    touchPick.push(() => b.remove());
+  };
+  makeBtn('GO FOR 1', 1, true);
+  makeBtn('GO FOR 2', 2, false);
+}
+
+function endGame() {
+  phase = 'over';
+  meta.over = true;
+  touch.setMode('menu');
+  const h = score[TEAM.HOME];
+  const a = score[TEAM.AWAY];
+  ui.showResult(
+    `${h} — ${a}`,
+    h > a ? 'YOU TOOK THE BLOCK.' : h < a ? 'THEY RAN YOU OFF THE LOT.' : 'DEAD EVEN. RUN IT BACK.'
+  );
 }

@@ -76,14 +76,20 @@ function makeTargetIcon(letter) {
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = S;
   const g = canvas.getContext('2d');
+  // Drop shadow + heavy outline so the letter stays readable against a lit
+  // field; tone mapping and bloom wash out a flat pastel disc.
   g.beginPath();
-  g.arc(S / 2, S / 2, S / 2 - 10, 0, Math.PI * 2);
-  g.fillStyle = '#ffd54a';
+  g.arc(S / 2, S / 2 + 3, S / 2 - 10, 0, Math.PI * 2);
+  g.fillStyle = 'rgba(0,0,0,0.45)';
   g.fill();
-  g.lineWidth = 9;
-  g.strokeStyle = '#1a1a1a';
+  g.beginPath();
+  g.arc(S / 2, S / 2, S / 2 - 12, 0, Math.PI * 2);
+  g.fillStyle = '#ffc21a';
+  g.fill();
+  g.lineWidth = 11;
+  g.strokeStyle = '#141414';
   g.stroke();
-  g.font = 'bold 72px system-ui, sans-serif';
+  g.font = 'bold 74px system-ui, sans-serif';
   g.textAlign = 'center';
   g.textBaseline = 'middle';
   g.fillStyle = '#1a1a1a';
@@ -93,8 +99,8 @@ function makeTargetIcon(letter) {
   const sprite = new THREE.Sprite(
     new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
   );
-  sprite.scale.setScalar(0.6);
-  sprite.position.y = 2.5;
+  sprite.scale.setScalar(0.85);
+  sprite.position.y = 2.7;
   sprite.renderOrder = 10;
   sprite.visible = false;
   return sprite;

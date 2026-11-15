@@ -12,6 +12,7 @@ import { createFX } from './effects.js';
 import { createUI } from './ui.js';
 import { createTouchControls, lockViewport } from './touch.js';
 import { createAudio } from './audio.js';
+import { toonify, addOutlines, RAMPS } from './toon.js';
 import {
   SLOT, ROSTER_SIZE, TARGET_SLOTS, TARGET_KEYS, TARGET_LETTERS,
   OFFENSE_PLAYS, DEFENSE_PLAYS, ZONE_SPOTS,
@@ -30,7 +31,7 @@ import {
 
 const TEAM = { HOME: 0, AWAY: 1 };
 const TEAM_NAMES = { [TEAM.HOME]: 'HOME', [TEAM.AWAY]: 'AWAY' };
-const TEAM_COLORS = { [TEAM.HOME]: 0xb9f227, [TEAM.AWAY]: 0xef4444 };
+const TEAM_COLORS = { [TEAM.HOME]: 0xb9f227, [TEAM.AWAY]: 0xff3b30 };
 const ATTACK_DIR = { [TEAM.HOME]: 1, [TEAM.AWAY]: -1 };
 const USER_TEAM = TEAM.HOME;
 
@@ -121,12 +122,14 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY.pixelRatio));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.12;
+renderer.toneMapping = THREE.NoToneMapping; // flat, saturated, cartoon
+renderer.toneMappingExposure = 1;
 document.querySelector('#app').appendChild(renderer.domElement);
 
 const { losLine, markerLine } = createDriveLines(scene);
 const ball = createBall(scene);
+ball.mesh.material = toonify(ball.mesh.material, { ramp: RAMPS.character });
+addOutlines(ball.mesh, { color: 0x111413, width: 0.012 });
 const powerups = createPowerups(scene);
 const fx = createFX(scene, camera);
 

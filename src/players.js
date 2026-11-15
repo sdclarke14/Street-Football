@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { TIERS } from './stamina.js';
+import { toonifyTree, addOutlines, RAMPS } from './toon.js';
 
 // All three GLBs share an identical 24-joint skeleton (verified), so the
 // turbo/regular clips bind by bone name onto clones of the base rig.
@@ -11,7 +12,15 @@ const PLAYER_HEIGHT = 1.8;
 // jersey green is chroma-distinct from skin/white/black — so the away kit is
 // made by swapping R/G on green-dominant pixels: green jersey -> red jersey,
 // everything else untouched.
-function makeRedVariant(map) {
+// One pass over the baked atlas does two jobs: push saturation and contrast
+// so the kit reads as cartoon rather than photographic, and (for the away
+// team) swap the green jersey to red. The green is chroma-distinct from
+// skin/white/black, so swapping R and G on green-dominant pixels recolours
+// the jersey and nothing else.
+const SATURATION = 1.38; // applied in proportion to a pixel's own chroma
+const CONTRAST = 1.1;
+
+function processAtlas(map, { toRed = false } = {}) {
   const SIZE = 2048;
   const canvas = document.createElement('canvas');
   canvas.width = SIZE;
@@ -21,12 +30,34 @@ function makeRedVariant(map) {
   const imageData = g.getImageData(0, 0, SIZE, SIZE);
   const d = imageData.data;
   for (let i = 0; i < d.length; i += 4) {
-    const r = d[i];
-    const green = d[i + 1];
-    if (green > r * 1.15 && green > d[i + 2] * 1.05) {
-      d[i] = green;
-      d[i + 1] = r;
+    let r = d[i];
+    let gr = d[i + 1];
+    let b = d[i + 2];
+    if (toRed && gr > r * 1.15 && gr > b * 1.05) {
+      // Swapping R and G on the green jersey lands on a dull maroon, which
+      // reads as brown at gameplay distance. Push it toward a bright kit red.
+      const t = r;
+      r = gr;
+      gr = t;
+      r = Math.min(255, r * 1.35 + 28);
+      gr *= 0.72;
+      b *= 0.72;
     }
+    // Saturate around luminance — but scale the boost by how colourful the
+    // pixel already is, so the jersey pops while skin, white and black stay
+    // where they are. A flat boost turns every skin tone orange.
+    const lum = 0.299 * r + 0.587 * gr + 0.114 * b;
+    const chroma = Math.max(r, gr, b) - Math.min(r, gr, b);
+    const sat = 1 + (SATURATION - 1) * Math.min(1, chroma / 110);
+    r = lum + (r - lum) * sat;
+    gr = lum + (gr - lum) * sat;
+    b = lum + (b - lum) * sat;
+    r = (r - 128) * CONTRAST + 128;
+    gr = (gr - 128) * CONTRAST + 128;
+    b = (b - 128) * CONTRAST + 128;
+    d[i] = r < 0 ? 0 : r > 255 ? 255 : r;
+    d[i + 1] = gr < 0 ? 0 : gr > 255 ? 255 : gr;
+    d[i + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
   }
   g.putImageData(imageData, 0, 0);
 
@@ -60,7 +91,8 @@ export async function loadPlayerAssets() {
     template: base.scene,
     scale,
     yOffset: -bbox.min.y * scale,
-    redMap: makeRedVariant(baseMap),
+    homeMap: processAtlas(baseMap),
+    redMap: processAtlas(baseMap, { toRed: true }),
     clips: {
       [TIERS.GASSED]: base.animations[0], // Lean_Forward_Sprint, played slow
       [TIERS.TURBO]: turbo.animations[0],
@@ -108,23 +140,27 @@ function makeTargetIcon(letter) {
 
 export function createPlayer(assets, { team, color, redJersey = false, iconLetter = null }) {
   const rig = cloneSkinned(assets.template);
-  if (redJersey) {
-    rig.traverse((c) => {
-      if (c.isMesh) {
-        c.material = c.material.clone();
-        // This asset carries its base look in BOTH map and emissiveMap
-        // (white emissive at intensity 1 — that's its cel-shaded look), so
-        // both slots must point at the recolored atlas.
-        c.material.map = assets.redMap;
-        c.material.emissiveMap = assets.redMap;
-      }
-    });
-  }
+  const kit = redJersey ? assets.redMap : assets.homeMap;
+  rig.traverse((c) => {
+    if (!c.isMesh) return;
+    c.material = c.material.clone();
+    // The asset carries its look in BOTH map and emissiveMap; toonify()
+    // drops emissive so the toon ramp can actually shade the model, and
+    // both slots point at the processed atlas either way.
+    c.material.map = kit;
+    c.material.emissiveMap = kit;
+  });
   rig.scale.setScalar(assets.scale);
   rig.position.y = assets.yOffset;
   rig.traverse((c) => {
     if (c.isMesh) c.castShadow = true;
   });
+
+  // Cel pass: hard-banded toon ramp, then an inverted-hull ink outline.
+  // The shell lives inside the rig's own scale, so the width has to be
+  // divided by that scale to come out a fixed thickness on screen.
+  toonifyTree(rig, { ramp: RAMPS.character });
+  addOutlines(rig, { color: 0x0e100f, width: 0.04 / assets.scale });
 
   const group = new THREE.Group();
   group.add(rig);

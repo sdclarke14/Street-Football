@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { toonifyTree, RAMPS } from './toon.js';
 
 // 7-on-7 street field. Play runs along X: goal lines at ±halfLength, end
 // zones beyond them, sidelines at ±halfWidth. 1 unit = 1 yard, so the field
@@ -25,14 +26,14 @@ export const SURFACES = {
     name: 'THE PARK',
     blurb: 'Cut grass, chalk lines, full bleachers.',
     swatch: '#4f8f3a',
-    base: '#4b7f34',
+    base: '#55923a',
     paintAlpha: 0.85,
     roughness: 0.82,
     sky: 0xbfe4ff,
     fog: [0xcfe8ff, 90, 190],
-    sun: { color: 0xfff1d4, intensity: 2.5, pos: [38, 26, -20] },
-    hemi: [0xdcefff, 0x3f4a2e, 0.85],
-    rim: { color: 0xbfe0ff, intensity: 0.45 },
+    sun: { color: 0xfffaf0, intensity: 2.15, pos: [38, 26, -20] },
+    hemi: [0xeaf6ff, 0x6d7f55, 0.95],
+    rim: { color: 0xbfe0ff, intensity: 0.3 },
     crowdRows: 7,
     crowdFill: 0.9,
     surround: 'trees',
@@ -43,14 +44,14 @@ export const SURFACES = {
     name: 'THE BLOCK',
     blurb: 'Cracked concrete, graffiti, chain-link.',
     swatch: '#8f8d88',
-    base: '#8b8984',
+    base: '#9a9892',
     paintAlpha: 0.55,
     roughness: 0.95,
     sky: 0xffc98d,
     fog: [0xffc98d, 85, 180],
-    sun: { color: 0xffb168, intensity: 2.4, pos: [35, 14, -22] },
-    hemi: [0xffdcb0, 0x5a5248, 0.75],
-    rim: { color: 0x9fd8ff, intensity: 0.5 },
+    sun: { color: 0xffe0bc, intensity: 2.1, pos: [35, 14, -22] },
+    hemi: [0xffeed6, 0x8a8278, 0.92],
+    rim: { color: 0x9fd8ff, intensity: 0.32 },
     crowdRows: 5,
     crowdFill: 0.75,
     surround: 'city',
@@ -61,14 +62,14 @@ export const SURFACES = {
     name: 'THE DUST BOWL',
     blurb: 'Light brown dirt, dead patches, rundown.',
     swatch: '#b09468',
-    base: '#b0956b',
+    base: '#bb9e70',
     paintAlpha: 0.22,
     roughness: 1.0,
     sky: 0xe8cfa4,
     fog: [0xe0c69a, 78, 170],
-    sun: { color: 0xffd9a0, intensity: 2.1, pos: [30, 18, -26] },
-    hemi: [0xf4ddb8, 0x6b5a42, 0.8],
-    rim: { color: 0xffe2b0, intensity: 0.35 },
+    sun: { color: 0xfff0dc, intensity: 2.0, pos: [30, 18, -26] },
+    hemi: [0xfaeed6, 0x9a8a70, 0.95],
+    rim: { color: 0xffe2b0, intensity: 0.25 },
     crowdRows: 4,
     crowdFill: 0.4,
     surround: 'weeds',
@@ -686,6 +687,9 @@ export function buildWorld(scene, surfaceKey, quality = { crowdFill: 1, crowdStr
   addFence(root, surf);
   addSurround(root, surf);
   const crowd = addCrowd(root, surf, quality);
+  // Everything in the venue gets the same banded ramp as the players so the
+  // cel look is consistent rather than characters-on-a-photo.
+  toonifyTree(root, { ramp: RAMPS.world });
 
   // Lighting travels with the venue.
   scene.background = new THREE.Color(surf.sky);

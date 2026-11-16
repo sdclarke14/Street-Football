@@ -1005,6 +1005,63 @@ function resolveTackle() {
 const scratch = new THREE.Vector3();
 const scratch2 = new THREE.Vector3();
 
+// Direction toward grass: push away from every nearby opponent, add a
+// bias, and stay off the sideline. Used by receivers once their route is
+// run and during a scramble drill.
+const _open = new THREE.Vector3();
+function openSpaceDir(p, biasX, biasZ) {
+  _open.set(biasX, 0, biasZ);
+  for (const d of players) {
+    if (d.team === p.team || d.down) continue;
+    const dx = p.group.position.x - d.group.position.x;
+    const dz = p.group.position.z - d.group.position.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 9 || dist < 0.01) continue;
+    const w = ((9 - dist) / 9) ** 2;
+    _open.x += (dx / dist) * w * 2.4;
+    _open.z += (dz / dist) * w * 2.4;
+  }
+  const z = p.group.position.z;
+  const edge = FIELD.halfWidth - 3;
+  if (Math.abs(z) > edge) _open.z -= Math.sign(z) * (Math.abs(z) - edge) * 1.6;
+  if (_open.lengthSq() < 0.0001) _open.set(biasX || 1, 0, 0);
+  return _open.normalize();
+}
+
+// Closest any defender gets to the line from the passer to the receiver.
+// A low number means the ball gets batted down on the way.
+function laneClearance(from, wr) {
+  const ax = from.group.position.x;
+  const az = from.group.position.z;
+  const vx = wr.group.position.x - ax;
+  const vz = wr.group.position.z - az;
+  const len2 = vx * vx + vz * vz || 1;
+  let worst = Infinity;
+  for (const d of teamPlayers(defenseTeam())) {
+    if (incapacitated(d) || d.down) continue;
+    // Only the middle of the flight path counts. Sampling the whole segment
+    // always caught the defender draped on the receiver, which made every
+    // throw look blocked and left the quarterback taking sacks instead.
+    const t = THREE.MathUtils.clamp(
+      ((d.group.position.x - ax) * vx + (d.group.position.z - az) * vz) / len2,
+      0.12, 0.82
+    );
+    const px = ax + vx * t;
+    const pz = az + vz * t;
+    worst = Math.min(worst, Math.hypot(d.group.position.x - px, d.group.position.z - pz));
+  }
+  return worst;
+}
+
+function coverageCount(wr, radius = 4) {
+  let n = 0;
+  for (const d of teamPlayers(defenseTeam())) {
+    if (incapacitated(d) || d.down) continue;
+    if (d.group.position.distanceTo(wr.group.position) < radius) n++;
+  }
+  return n;
+}
+
 function nearestOpponentDist(p) {
   let best = Infinity;
   for (const o of players) {
@@ -1042,11 +1099,21 @@ function trackBall(p) {
 
 function followRoute(p, speed = WR_SPEED) {
   const route = play.routes.get(p);
+  const attack = ATTACK_DIR[p.team];
+  const qb = offensePlayer(SLOT.QB);
+
+  // Scramble drill: once the quarterback breaks the pocket the route is
+  // dead. Work back across into his vision and find grass.
+  if (play.qbScrambling && qb && ball.carrier === qb) {
+    const toward = Math.sign(qb.group.position.z - p.group.position.z) || 1;
+    p.velocity
+      .copy(openSpaceDir(p, attack * 0.4, toward * 0.9))
+      .multiplyScalar(speed * 0.95);
+    return;
+  }
   if (!route || !route.length) {
-    // Route finished: drift to open grass rather than standing still.
-    const attack = ATTACK_DIR[p.team];
-    scratch.set(attack * 2, 0, p.group.position.z > 0 ? 1 : -1);
-    p.velocity.copy(scratch.normalize()).multiplyScalar(speed * 0.45);
+    // Route run: uncover rather than standing still or drifting blindly.
+    p.velocity.copy(openSpaceDir(p, attack * 1.2, 0)).multiplyScalar(speed * 0.7);
     return;
   }
   scratch.set(route[0].x - p.group.position.x, 0, route[0].z - p.group.position.z);
@@ -1066,10 +1133,13 @@ function updateBlocker(p) {
   scratch2.copy(protectee.group.position);
   scratch2.x += attack * 4;
   for (const d of teamPlayers(defenseTeam())) {
-    if (incapacitated(d)) continue;
+    if (incapacitated(d) || d.down) continue;
     if (d.blockedBy && d.blockedBy !== p && d.blockedBy.group.position.distanceTo(d.group.position) < 2.5) continue;
-    const dist = d.group.position.distanceTo(scratch2);
-    if (dist < bd) { bd = dist; threat = d; }
+    // Pick by who gets there first, not who is nearest: a fast man eight
+    // yards out is a bigger problem than a slow one at five.
+    const eta =
+      d.group.position.distanceTo(scratch2) / (DEF_SPEED * (d.speedMul ?? 1));
+    if (eta < bd) { bd = eta; threat = d; }
   }
   if (!threat) {
     p.velocity.set(0, 0, 0);
@@ -1155,17 +1225,45 @@ function updateAIQuarterback(qb) {
   if (play.thrown || ball.carrier !== qb) return;
 
   if (play.t > QB_MIN_HOLD) {
-    // Progression: throw to the most open receiver past the sticks first.
+    // Read the field rather than just picking whoever has the most air:
+    // throwing lane, how many bodies are around him, how far he has to
+    // heave it, whose hands he trusts, and whether the down needs yards.
+    const late = play.clockRunning && play.passClock < 1.6;
+    const needed = drive.down >= 3 && !drive.goalToGo ? toGoYards() : 0;
     let best = null;
     let bestScore = -Infinity;
     for (const slot of TARGET_SLOTS) {
       const wr = offensePlayer(slot);
-      if (!wr || incapacitated(wr)) continue;
+      if (!wr || incapacitated(wr) || wr.down) continue;
       const open = nearestOpponentDist(wr);
-      if (open < QB_OPEN_DIST) continue;
-      const downfield = offAttack() * (wr.group.position.x - drive.los);
-      const s = open * 1.4 + downfield * 0.55;
-      if (s > bestScore) { bestScore = s; best = wr; }
+      const lane = laneClearance(qb, wr);
+      const depth = offAttack() * (wr.group.position.x - drive.los);
+      const dist = wr.group.position.distanceTo(qb.group.position);
+      if (lane < 0.9 && !late) continue;     // it gets batted down
+      if (open < QB_OPEN_DIST && !late) continue;
+      let score = open * 1.5 + lane * 0.9 + depth * 0.5;
+      score += (wr.character?.attr.hands ?? 70) * 0.035; // trust good hands
+      score -= coverageCount(wr) * 2.4;                  // never into a crowd
+      score -= Math.max(0, dist - 24) * 0.7;             // don't heave it
+      if (needed > 0 && depth < needed) score -= 4;      // get the sticks
+      if (late) score += Math.max(0, 9 - dist) * 0.8;    // take the checkdown
+      if (score > bestScore) { bestScore = score; best = wr; }
+    }
+    if (!best && late) {
+      // Clock gone and nobody is open: get rid of it at the shortest,
+      // cleanest option rather than eating the sack.
+      let fallback = null;
+      let fbScore = -Infinity;
+      for (const slot of TARGET_SLOTS) {
+        const wr = offensePlayer(slot);
+        if (!wr || incapacitated(wr) || wr.down) continue;
+        const sc =
+          laneClearance(qb, wr) * 1.5 +
+          nearestOpponentDist(wr) -
+          wr.group.position.distanceTo(qb.group.position) * 0.35;
+        if (sc > fbScore) { fbScore = sc; fallback = wr; }
+      }
+      best = fallback;
     }
     if (best) {
       throwToReceiver(best, best.group.position.distanceTo(qb.group.position) > 16);
@@ -1173,7 +1271,7 @@ function updateAIQuarterback(qb) {
     }
   }
   // Clock about to pop: take off and run.
-  if (play.clockRunning && play.passClock < 1.1) play.qbScrambling = true;
+  if (play.clockRunning && play.passClock < 1.35) play.qbScrambling = true;
 }
 
 function updateDefender(d) {
@@ -1213,7 +1311,13 @@ function updateDefender(d) {
       pursue(d, scratch, DEF_SPEED * 0.5);
       return;
     }
-    pursue(d, qb.group.position);
+    // Rush to a point just outside the quarterback's near shoulder rather
+    // than straight at him, so he can't simply step around the charge.
+    aimAt.copy(qb.group.position);
+    const side = Math.sign(d.group.position.z - qb.group.position.z) || 1;
+    aimAt.z += side * 0.9;
+    aimAt.x -= attack * 0.4;
+    pursue(d, aimAt);
     return;
   }
   if (job.mode === 'spy') {
@@ -1232,16 +1336,25 @@ function updateDefender(d) {
   }
   if (job.mode === 'zone') {
     scratch.set(drive.los + attack * job.spot[0], 0, job.spot[1] * attack);
-    // Break on any receiver who shows up in the zone.
-    let intruder = null;
-    let bd = 6.5;
+    // Carry the deepest receiver who enters the zone, and hand him off —
+    // sinking back to the landmark — once he runs out of it.
+    let claim = null;
+    let deepest = -Infinity;
     for (const slot of TARGET_SLOTS) {
       const wr = offensePlayer(slot);
-      if (!wr) continue;
-      const dist = wr.group.position.distanceTo(scratch);
-      if (dist < bd) { bd = dist; intruder = wr; }
+      if (!wr || wr.down || incapacitated(wr)) continue;
+      if (wr.group.position.distanceTo(scratch) > 7.5) continue;
+      const depth = attack * (wr.group.position.x - drive.los);
+      if (depth > deepest) { deepest = depth; claim = wr; }
     }
-    pursue(d, intruder ? intruder.group.position : scratch);
+    if (claim) {
+      aimAt.copy(claim.group.position);
+      aimAt.x += attack * 0.8;
+      aimAt.addScaledVector(claim.actual, 0.12);
+      pursue(d, aimAt);
+    } else {
+      pursue(d, scratch);
+    }
     return;
   }
   if (job.mode === 'free') {
@@ -1265,9 +1378,13 @@ function updateDefender(d) {
     pursue(d, qb.group.position);
     return;
   }
+  // Leverage: a defender slower than his man has to play off him, a faster
+  // one can sit on top of him. Cushion is yards toward his own goal.
+  const gap = (man.speedMul ?? 1) - (d.speedMul ?? 1);
+  const cushion = THREE.MathUtils.clamp(0.9 + gap * 7, 0.3, 3.4);
   scratch.copy(man.group.position);
-  scratch.x += attack * 1.0;
-  scratch.addScaledVector(man.velocity, 0.12); // jump the route a little
+  scratch.x += attack * cushion;
+  scratch.addScaledVector(man.actual, 0.14); // jump the route a little
   pursue(d, scratch);
 }
 
@@ -1275,10 +1392,18 @@ function updateDefender(d) {
 // every defender runs at his current spot and the whole pile collapses on
 // the handoff, which is what made designed runs unplayable.
 const leadPos = new THREE.Vector3();
+const aimAt = new THREE.Vector3();
 function pursueCarrier(d, carrier, speed = DEF_SPEED) {
-  const gap = d.group.position.distanceTo(carrier.group.position);
-  const lead = THREE.MathUtils.clamp(gap / (speed * 2.2), 0, 0.55);
-  leadPos.copy(carrier.group.position).addScaledVector(carrier.velocity, lead);
+  // Solve for where the carrier will be when this defender can actually
+  // get there, iterating once on the time. A slow man has to aim much
+  // further ahead than a fast one — that's the whole idea of an angle.
+  const mySpeed = Math.max(0.1, speed * (d.speedMul ?? 1));
+  let t = d.group.position.distanceTo(carrier.group.position) / mySpeed;
+  for (let i = 0; i < 2; i++) {
+    leadPos.copy(carrier.group.position).addScaledVector(carrier.actual, t);
+    t = d.group.position.distanceTo(leadPos) / mySpeed;
+  }
+  leadPos.copy(carrier.group.position).addScaledVector(carrier.actual, Math.min(t, 1.2));
   leadPos.z = THREE.MathUtils.clamp(leadPos.z, -FIELD.halfWidth, FIELD.halfWidth);
   pursue(d, leadPos, speed);
 }

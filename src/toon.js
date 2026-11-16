@@ -26,7 +26,7 @@ const RAMP_WORLD = makeGradientMap([168, 212, 244, 255]);   // 4 bands, nearly f
 // The source rig bakes its look into BOTH map and emissiveMap with white
 // emissive, which would flood out any shading — so emissive is dropped and
 // the atlas is used as the colour map instead.
-export function toonify(material, { ramp = RAMP_WORLD, keepEmissive = false } = {}) {
+export function toonify(material, { ramp = RAMP_WORLD, keepEmissive = false, tintable = false } = {}) {
   if (!material || material.isMeshToonMaterial) return material;
   const map = material.map ?? material.emissiveMap ?? null;
   const toon = new THREE.MeshToonMaterial({
@@ -44,8 +44,61 @@ export function toonify(material, { ramp = RAMP_WORLD, keepEmissive = false } = 
     toon.emissive = material.emissive.clone();
     toon.emissiveIntensity = material.emissiveIntensity ?? 1;
   }
+  if (tintable) addKitTint(toon);
   toon.name = material.name;
   return toon;
+}
+
+// Recolour the kit in the fragment shader rather than repainting a 2048px
+// atlas per player. The source atlas has a green jersey that is chroma-
+// distinct from skin, white and black, so green-dominant texels become the
+// character's own colour. Near-white texels (trim, undershirt, socks) take
+// a lighter wash of the team colour, which is what keeps the two sides
+// apart once every player is wearing something different.
+function addKitTint(material) {
+  const kit = { value: new THREE.Color(0x4c9e16) };
+  const team = { value: new THREE.Color(0xb9f227) };
+  material.userData.kitUniform = kit;
+  material.userData.teamUniform = team;
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.kitColor = kit;
+    shader.uniforms.teamColor = team;
+    shader.fragmentShader =
+      'uniform vec3 kitColor;\nuniform vec3 teamColor;\n' +
+      shader.fragmentShader.replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+        {
+          float mxAll = max( diffuseColor.r, max( diffuseColor.g, diffuseColor.b ) );
+          float mnAll = min( diffuseColor.r, min( diffuseColor.g, diffuseColor.b ) );
+          float lum = dot( diffuseColor.rgb, vec3( 0.299, 0.587, 0.114 ) );
+          bool jersey = diffuseColor.g > max( diffuseColor.r, diffuseColor.b ) * 1.10
+                     && diffuseColor.g > 0.06;
+          if ( jersey ) {
+            // The kit is multiplied by the atlas luminance and again by the
+            // toon ramp, so a straight tint comes out muddy. Lift it and
+            // floor it so the colour reads as the colour.
+            diffuseColor.rgb = kitColor * clamp( 0.45 + lum * 1.9, 0.62, 1.45 );
+          } else if ( mxAll - mnAll < 0.12 && lum > 0.42 ) {
+            diffuseColor.rgb = mix(
+              diffuseColor.rgb,
+              teamColor * clamp( 0.55 + lum * 0.8, 0.5, 1.25 ),
+              0.78
+            );
+          }
+        }`
+      );
+  };
+}
+
+// Set a rig's kit and team colours. Safe before or after shader compile.
+export function setKit(root, kitHex, teamHex) {
+  root.traverse((c) => {
+    const u = c.material?.userData;
+    if (!u?.kitUniform) return;
+    u.kitUniform.value.set(kitHex);
+    u.teamUniform.value.set(teamHex);
+  });
 }
 
 // Walk a subtree and toon-ify every material on it.
@@ -148,6 +201,15 @@ export function addOutlines(root, { color = 0x0d0f0e, width = 0.018 } = {}) {
     shells.push(shell);
   }
   return shells;
+}
+
+// Tint the ink per team. Kept very dark so it still reads as an outline,
+// but the hue gives each side a silhouette cue that survives a pile-up,
+// where the ground rings are hidden under bodies.
+export function setOutlineColor(root, hex) {
+  root.traverse((c) => {
+    if (c.userData.isOutline && c.material?.color) c.material.color.set(hex);
+  });
 }
 
 export function setOutlineWidth(root, width) {

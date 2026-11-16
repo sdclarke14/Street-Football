@@ -1729,7 +1729,6 @@ function buildTeams() {
       const p = createPlayer(assets, {
         team,
         color: TEAM_COLORS[team],
-        redJersey: team === TEAM.AWAY,
         iconLetter: team === USER_TEAM ? TARGET_LETTERS[slot] ?? null : null,
       });
       p.slot = slot;
@@ -1752,7 +1751,7 @@ let pendingStart = null;
 function applySquads(homeSquad, awaySquad) {
   for (const p of players) {
     const squad = p.team === TEAM.HOME ? homeSquad : awaySquad;
-    applyBuild(p, assets, squad[p.slot] ?? CHARACTERS[0]);
+    applyBuild(p, assets, squad[p.slot] ?? CHARACTERS[0], TEAM_COLORS[p.team]);
   }
 }
 

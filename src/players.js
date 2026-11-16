@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { TIERS } from './stamina.js';
-import { toonifyTree, addOutlines, RAMPS, setOutlineWidth } from './toon.js';
+import { toonifyTree, addOutlines, RAMPS, setOutlineWidth, setKit, setOutlineColor } from './toon.js';
 import { captureRig, createPoseState } from './anim.js';
 import { toMultipliers } from './roster.js';
 
@@ -93,8 +93,9 @@ export async function loadPlayerAssets() {
     template: base.scene,
     scale,
     yOffset: -bbox.min.y * scale,
+    // One atlas for everybody: the kit is recoloured in the shader now, so
+    // the second full-size canvas pass for a red variant is gone.
     homeMap: processAtlas(baseMap),
-    redMap: processAtlas(baseMap, { toRed: true }),
     clips: {
       [TIERS.GASSED]: base.animations[0], // Lean_Forward_Sprint, played slow
       [TIERS.TURBO]: turbo.animations[0],
@@ -140,9 +141,9 @@ function makeTargetIcon(letter) {
   return sprite;
 }
 
-export function createPlayer(assets, { team, color, redJersey = false, iconLetter = null, build = null }) {
+export function createPlayer(assets, { team, color, iconLetter = null, build = null }) {
   const rig = cloneSkinned(assets.template);
-  const kit = redJersey ? assets.redMap : assets.homeMap;
+  const kit = assets.homeMap;
   rig.traverse((c) => {
     if (!c.isMesh) return;
     c.material = c.material.clone();
@@ -162,15 +163,15 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
   // Build scaling is applied by applyBuild() once the rig exists.
   // The shell lives inside the rig's own scale, so the width has to be
   // divided by that scale to come out a fixed thickness on screen.
-  toonifyTree(rig, { ramp: RAMPS.character });
+  toonifyTree(rig, { ramp: RAMPS.character, tintable: true });
   addOutlines(rig, { color: 0x0e100f, width: 0.04 / assets.scale });
 
   const group = new THREE.Group();
   group.add(rig);
 
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.45, 0.62, 32),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85 })
+    new THREE.RingGeometry(0.46, 0.72, 32),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 })
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.03;
@@ -242,7 +243,10 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
 // Re-shape an existing player to a character's build. Called when a squad
 // is drafted, so the 14 rigs are built once and re-used rather than cloned
 // again every game.
-export function applyBuild(player, assets, character) {
+// Near-black ink carrying just enough of the team hue to read.
+const TEAM_INK = { 0: 0x16250b, 1: 0x2c0c09 };
+
+export function applyBuild(player, assets, character, teamHex = 0xffffff) {
   const bh = character?.build?.height ?? 1;
   const bg = character?.build?.girth ?? 1;
   player.rig.scale.set(assets.scale * bg, assets.scale * bh, assets.scale * bg);
@@ -253,6 +257,10 @@ export function applyBuild(player, assets, character) {
   // build factor to keep the outline an even weight across the roster.
   setOutlineWidth(player.rig, 0.04 / (assets.scale * Math.max(bh, bg)));
   player.character = character;
+  // The character's own kit colour goes on the jersey; the team colour
+  // washes the whites, which is what keeps the sides readable.
+  setKit(player.rig, character.kit, teamHex);
+  setOutlineColor(player.rig, TEAM_INK[player.team] ?? 0x0e100f);
   Object.assign(player, toMultipliers(character));
   // Stamina is a per-character trait too: who can keep the turbo down.
   player.stam.drainRate = 22 / player.staminaMul;

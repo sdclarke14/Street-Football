@@ -70,6 +70,10 @@ const DIVE_CATCH_DIST = 2.1;
 const THROW_SPEED = 19;
 const BLOCK_RADIUS = 1.25;
 const TACKLE_WINDOW = 0.3;
+// Contact
+const GANG_RADIUS = 1.6;   // a second defender this close piles on
+const FALL_DURATION = 0.7; // how long going to ground takes
+const FALL_FORWARD = 0.8;  // yards the carrier gains falling forward
 const TACKLE_DRAG = 0.38;
 const TACKLE_BREAK_COST = 34;
 const SNAP_FLIGHT_TIME = 0.24;
@@ -213,6 +217,7 @@ const drive = { offense: TEAM.HOME, los: 0, lineToGain: 0, down: 1, goalToGo: fa
 const meta = {
   clock: GAME_SECONDS, options: { pickups: true, sound: true }, over: false,
   lastResult: null, // { reason, spot, gain } — the reason the last play ended
+  lastTackle: null, // { type, gang, extra, spot } — how the last tackle went
 };
 
 const play = {
@@ -405,9 +410,8 @@ function startMove(p, type) {
     if (type === 'truck') {
       // Power move: run through the guy instead of around him.
       if (dist < 2.0) {
-        d.stumbleT = 1.1;
+        knockDown(d, -1); // run straight through him
         d.tackleCooldown = 1.3;
-        d.velocity.set(0, 0, 0);
         fx.hitFlash(d.group.position.clone().setY(1.1), 1.3);
         fx.shake(0.22);
         hitStop(0.05);
@@ -562,6 +566,9 @@ function lineupPlay() {
     p.moveCooldown = 0;
     p.tackleCooldown = 0;
     p.blockedBy = null; // stale block assignments would carry between plays
+    p.down = false;
+    p.downT = 0;
+    p.rig.position.y = p.restRigY; // get up off the floor
     p.stam.value = Math.min(p.stam.max, p.stam.value + 34); // breathe between plays
   };
 
@@ -855,57 +862,134 @@ function onHazardHit(hazard, victim) {
 
 // ---- Tackling -------------------------------------------------------------
 
+// Put a player on the ground. dir +1 falls forward, -1 goes over backwards.
+// He stays down until the next lineup resets him.
+function knockDown(p, dir) {
+  p.down = true;
+  p.downT = 0;
+  p.fallDir = dir;
+  p.pose.name = null; // the down pose takes over from whatever was playing
+  p.velocity.set(0, 0, 0);
+  p.actual.set(0, 0, 0);
+}
+
 function tryStartTackle(defender, carrier) {
-  if (play.tackle || defender.tackleCooldown > 0 || incapacitated(defender)) return;
-  play.tackle = { defender, t: TACKLE_WINDOW, sprintHeld: false };
+  if (play.tackle || defender.tackleCooldown > 0 || incapacitated(defender) || defender.down) return;
+
+  // Classify by how the defender's approach lines up with the carrier's
+  // momentum: chasing from behind is a drag-down, meeting him head-on is a
+  // wrap, anything in between is a shoestring hit at an angle.
+  scratch.copy(carrier.group.position).sub(defender.group.position);
+  scratch.y = 0;
+  scratch.normalize();
+  scratch2.copy(carrier.actual);
+  scratch2.y = 0;
+  let type = 'wrap';
+  const runSpeed = scratch2.length();
+  if (runSpeed > 0.6) {
+    scratch2.normalize();
+    const dot = scratch.dot(scratch2);
+    type = dot > 0.5 ? 'drag' : dot < -0.35 ? 'wrap' : 'shoestring';
+  }
+
+  play.tackle = {
+    defender,
+    helpers: new Set(),
+    t: TACKLE_WINDOW,
+    sprintHeld: false,
+    type,
+    // Read the carrier's speed at contact: by the time the tackle resolves
+    // the drag has bled it off, which zeroed the fall-forward bonus.
+    speed0: carrier.actual.length(),
+    // Forward progress: remember the furthest point he actually reached.
+    best: carrier.group.position.x,
+  };
   playPose(defender.pose, 'dive');
   fx.hitFlash(carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1), 0.9);
   hitStop(0.04);
-  audio.hit(0.7);
+  audio.hit(type === 'wrap' ? 0.9 : 0.7);
 }
 
 function resolveTackle() {
-  const { defender, sprintHeld } = play.tackle;
+  const { defender, sprintHeld, type, helpers, best, speed0 } = play.tackle;
   const carrier = ball.carrier;
   play.tackle = null;
   if (!carrier) return;
 
   const isUser = carrier === controlled;
+  const pile = helpers.size;
+  // One extra man drags you down but can still be run through; two or more
+  // is a genuine gang tackle. Blocking breaks on a single helper killed the
+  // running game outright — a 7-on-7 field almost always has a second
+  // defender nearby.
+  const gang = pile >= 2;
   // Gamebreaker and powerup turbo are automatic breaks. Otherwise the user
-  // has to be actively on the turbo with gas left, and it costs stamina.
-  let breaks = carrier.turboT > 0 || (gbActive() && carrier.team === USER_TEAM);
-  if (!breaks && isUser && sprintHeld && carrier.stam.tier !== TIERS.GASSED) {
+  // has to be actively on the turbo with gas left, and it costs stamina —
+  // but nobody shrugs off two or three men without a gamebreaker.
+  const unstoppable = gbActive() && carrier.team === USER_TEAM;
+  let breaks = unstoppable || (carrier.turboT > 0 && !gang);
+  if (!breaks && !gang && isUser && sprintHeld && carrier.stam.tier !== TIERS.GASSED) {
     breaks = true;
     carrier.stam.value = Math.max(0, carrier.stam.value - TACKLE_BREAK_COST);
   }
-  if (!breaks && !isUser && carrier.team !== USER_TEAM) {
-    breaks = Math.random() < 0.22; // AI runners break the odd one
+  if (!breaks && !gang && !isUser && carrier.team !== USER_TEAM) {
+    // A drag-down from behind is the easiest to run through.
+    breaks = Math.random() < (type === 'drag' ? 0.34 : 0.24);
   }
 
   const contact = carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1.1);
+
   if (breaks) {
     defender.commitTarget
-      .copy(defender.velocity.lengthSq() > 0.2 ? defender.velocity : carrier.velocity)
+      .copy(defender.actual.lengthSq() > 0.2 ? defender.actual : carrier.actual)
       .normalize().multiplyScalar(2.6).add(carrier.group.position);
     defender.commitT = 0.35;
-    defender.stumbleT = 1.0;
     defender.tackleCooldown = 1.2;
-    carrier.stumbleT = gbActive() ? 0 : 0.45;
+    // Running straight through a man puts him on his back; slipping a
+    // shoestring grab just leaves him stumbling.
+    if (unstoppable || type === 'wrap') knockDown(defender, -1);
+    else defender.stumbleT = 1.0;
+    carrier.stumbleT = unstoppable ? 0 : 0.45;
     fx.hitFlash(contact, 1.35);
     fx.shake(0.24);
     hitStop(0.06);
     audio.hit(1);
     cheer(0.55);
     if (carrier.team === USER_TEAM) addStyle(STYLE.brokenTackle);
-  } else {
-    fx.hitFlash(contact, 1.6);
-    fx.shake(0.35);
-    hitStop(0.08);
-    audio.hit(1.3);
-    cheer(0.4);
-    if (play.intReturn !== null) endReturn('tackle', carrier.group.position.x);
-    else endPlay('tackle', carrier.group.position.x);
+    return;
   }
+
+  // Tackle sticks. Who goes which way depends on the hit.
+  const attack = ATTACK_DIR[play.intReturn ?? drive.offense];
+  const headOn = type === 'wrap';
+  knockDown(carrier, headOn ? -1 : 1);
+  knockDown(defender, headOn ? 1 : -1);
+  for (const h of helpers) knockDown(h, headOn ? 1 : -1);
+
+  // Forward progress, plus the yard or so you get falling forward. A
+  // head-on wrap stops him where he stood; being dragged down from behind
+  // carries him on.
+  const momentum = Math.min(1, speed0 / SPRINT_SPEED[TIERS.TURBO]);
+  const extra = headOn ? 0 : FALL_FORWARD * momentum * (type === 'drag' ? 1 : 0.6);
+  const progress = attack > 0 ? Math.max(best, carrier.group.position.x) : Math.min(best, carrier.group.position.x);
+  const spot = progress + attack * extra;
+
+  meta.lastTackle = {
+    type, gang: pile, extra: +extra.toFixed(2),
+    spot: +spot.toFixed(2), contact: +carrier.group.position.x.toFixed(2),
+  };
+  const power = gang ? 1.5 : headOn ? 1.3 : 1;
+  fx.hitFlash(contact, 1.5 * power);
+  fx.shake(0.3 * power);
+  hitStop(0.07 * power);
+  audio.hit(1.2 * power);
+  cheer(gang ? 0.7 : 0.4);
+  if (gang) ui.hud.toast('GANG TACKLE');
+  else if (headOn) ui.hud.toast('WRAPPED UP');
+  else if (type === 'drag') ui.hud.toast('DRAGGED DOWN');
+
+  if (play.intReturn !== null) endReturn('tackle', spot);
+  else endPlay('tackle', spot);
 }
 
 // ---- AI -------------------------------------------------------------------
@@ -1356,9 +1440,26 @@ function updateLivePlay(dt) {
     play.tackle.t -= dt;
     play.tackle.sprintHeld ||= keys.has('shift') || touch.sprintHeld;
     const d = play.tackle.defender;
-    if (ball.carrier) {
-      pursue(d, ball.carrier.group.position, DEF_SPEED);
-      if (ball.carrier !== controlled && !gbActive()) ball.carrier.velocity.multiplyScalar(TACKLE_DRAG);
+    const carrier = ball.carrier;
+    if (carrier) {
+      pursue(d, carrier.group.position, DEF_SPEED);
+      // Furthest point reached — the spot comes off this, not off wherever
+      // the body ends up once everyone has fallen over.
+      const cx = carrier.group.position.x;
+      play.tackle.best = attack > 0
+        ? Math.max(play.tackle.best, cx)
+        : Math.min(play.tackle.best, cx);
+      // Anyone else in range piles on, and each extra man drags harder.
+      for (const o of players) {
+        if (o.team === carrier.team || o === d || incapacitated(o) || o.down) continue;
+        if (o.group.position.distanceTo(carrier.group.position) < GANG_RADIUS) {
+          play.tackle.helpers.add(o);
+        }
+      }
+      if (carrier !== controlled && !gbActive()) {
+        const drag = TACKLE_DRAG / (1 + play.tackle.helpers.size * 0.6);
+        carrier.velocity.multiplyScalar(drag);
+      }
     }
     if (play.tackle && play.tackle.t <= 0) resolveTackle();
   }
@@ -1422,7 +1523,7 @@ function updateLivePlay(dt) {
     }
     if (!play.tackle) {
       for (const d of players) {
-        if (d.team === carrier.team || incapacitated(d)) continue;
+        if (d.team === carrier.team || incapacitated(d) || d.down) continue;
         if (d.group.position.distanceTo(carrier.group.position) < TACKLE_DIST) {
           tryStartTackle(d, carrier);
           break;
@@ -1648,6 +1749,7 @@ function step(dt) {
     desiredVel.copy(p.velocity);
     // ...and the momentum actually being carried.
     p.velocity.copy(p.actual);
+    if (p.down) desiredVel.set(0, 0, 0); // nobody runs while they're on the floor
 
     if (p.moveState) {
       const m = p.moveState;
@@ -1713,10 +1815,21 @@ function step(dt) {
       ? -p.moveState.dir * 0.35 * Math.sin(Math.PI * Math.min(p.moveState.t / p.moveState.dur, 1))
       : 0;
     let pitch = 0;
-    if (p.slipT > 0) pitch = 0.8 * Math.sin(Math.PI * (1 - p.slipT / SLIP_DURATION));
-    else if (p.stumbleT > 0) pitch = 0.35 * Math.sin(Math.PI * (1 - p.stumbleT / 1.0));
-    else if (p.diveT > 0) pitch = 0.5;
-    else if (p.moveState?.type === 'truck') pitch = 0.3;
+    if (p.down) {
+      // Going to ground: pitch over and drop toward the turf, then hold
+      // there until the next lineup picks him back up.
+      p.downT += dt;
+      const k = Math.min(1, p.downT / FALL_DURATION);
+      const e = 1 - (1 - k) ** 3; // ease out
+      pitch = p.fallDir * 1.45 * e;
+      p.rig.position.y = p.restRigY - 0.45 * e;
+    } else {
+      if (p.rig.position.y !== p.restRigY) p.rig.position.y = p.restRigY;
+      if (p.slipT > 0) pitch = 0.8 * Math.sin(Math.PI * (1 - p.slipT / SLIP_DURATION));
+      else if (p.stumbleT > 0) pitch = 0.35 * Math.sin(Math.PI * (1 - p.stumbleT / 1.0));
+      else if (p.diveT > 0) pitch = 0.5;
+      else if (p.moveState?.type === 'truck') pitch = 0.3;
+    }
     p.rig.rotation.x = pitch;
 
     const clipTier =
@@ -1727,8 +1840,8 @@ function step(dt) {
     // Pose overlay. A paused run clip still writes its frozen stride, so a
     // standing player used to be a runner mid-step; idle/brace solve over it.
     const poseOut = stepPose(p.pose, dt, {
-      wantIdle: speed < 0.45 && p.stunT <= 0,
-      idleName: phase === 'lineup' ? 'brace' : 'idle',
+      wantIdle: p.down || (speed < 0.45 && p.stunT <= 0),
+      idleName: p.down ? 'down' : phase === 'lineup' ? 'brace' : 'idle',
       clock: clock.elapsedTime + p.poseOffset,
     });
     if (poseOut) {

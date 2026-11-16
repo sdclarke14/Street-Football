@@ -133,6 +133,21 @@ const TRUCK = {
   head: [0, 0.90, 0.44],
 };
 
+// Sprawled on the ground after a tackle. Declared in model space like the
+// rest, so it reads correctly however far the body is pitched over.
+const DOWN = {
+  lArm: [0.50, -0.10, 0.86],
+  lFore: [0.35, -0.15, 0.92],
+  rArm: [-0.50, -0.10, 0.86],
+  rFore: [-0.35, -0.15, 0.92],
+  lUpLeg: [0.16, -0.90, -0.40],
+  lLeg: [0.10, -0.84, -0.53],
+  rUpLeg: [-0.16, -0.90, -0.40],
+  rLeg: [-0.10, -0.84, -0.53],
+  chest: [0, 0.90, 0.44],
+  head: [0, 0.86, 0.51],
+};
+
 const CELEBRATE = {
   lArm: [0.55, 0.82, 0.15],
   lFore: [0.45, 0.89, 0.10],
@@ -154,6 +169,7 @@ export const POSES = {
   dive: { dur: 0.55, at: () => DIVE },
   truck: { dur: 0.4, at: () => TRUCK },
   celebrate: { dur: 1.8, at: () => CELEBRATE },
+  down: { dur: Infinity, loop: true, at: () => DOWN },
 };
 
 // ---- Solving -------------------------------------------------------------

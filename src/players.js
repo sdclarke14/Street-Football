@@ -211,6 +211,10 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
     poseRefs: captureRig(rig),
     pose: createPoseState(),
     poseOffset: Math.random() * 10, // desync the breathing
+    restRigY: rig.position.y, // restored when a knocked-down player gets up
+    down: false,
+    downT: 0,
+    fallDir: 1,
     // bones for ball socketing and procedural catch-reach
     hand: rig.getObjectByName('RightHand'),
     arms: {

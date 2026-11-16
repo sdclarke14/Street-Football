@@ -14,6 +14,7 @@ import { createTouchControls, lockViewport } from './touch.js';
 import { createAudio } from './audio.js';
 import { toonify, addOutlines, RAMPS } from './toon.js';
 import { applyPose, stepPose, playPose } from './anim.js';
+import { dealTeams } from './roster.js';
 import {
   SLOT, ROSTER_SIZE, TARGET_SLOTS, TARGET_KEYS, TARGET_LETTERS,
   OFFENSE_PLAYS, DEFENSE_PLAYS, ZONE_SPOTS,
@@ -930,11 +931,11 @@ function resolveTackle() {
   let breaks = unstoppable || (carrier.turboT > 0 && !gang);
   if (!breaks && !gang && isUser && sprintHeld && carrier.stam.tier !== TIERS.GASSED) {
     breaks = true;
-    carrier.stam.value = Math.max(0, carrier.stam.value - TACKLE_BREAK_COST);
+    carrier.stam.value = Math.max(0, carrier.stam.value - TACKLE_BREAK_COST / carrier.powerMul);
   }
   if (!breaks && !gang && !isUser && carrier.team !== USER_TEAM) {
     // A drag-down from behind is the easiest to run through.
-    breaks = Math.random() < (type === 'drag' ? 0.34 : 0.24);
+    breaks = Math.random() < (type === 'drag' ? 0.34 : 0.24) * carrier.powerMul;
   }
 
   const contact = carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1.1);
@@ -1576,14 +1577,22 @@ function updateTargets() {
 // ---- Boot -----------------------------------------------------------------
 
 function buildTeams() {
+  // Deal both sides out of the 21-character roster, no repeats.
+  const dealt = dealTeams(ROSTER_SIZE);
   for (const team of [TEAM.HOME, TEAM.AWAY]) {
+    const squad = team === TEAM.HOME ? dealt.home : dealt.away;
     for (let slot = 0; slot < ROSTER_SIZE; slot++) {
+      const character = squad[slot];
       const p = createPlayer(assets, {
         team,
         color: TEAM_COLORS[team],
         redJersey: team === TEAM.AWAY,
         iconLetter: team === USER_TEAM ? TARGET_LETTERS[slot] ?? null : null,
+        build: character.build,
       });
+      p.character = character;
+      p.speedMul = character.speed;
+      p.powerMul = character.power;
       p.slot = slot;
       p.actual = new THREE.Vector3(); // real velocity, carried across frames
       p.stam = new StaminaMeter({ regularBelow: 60, gassedBelow: 25 });
@@ -1772,6 +1781,7 @@ function step(dt) {
       // Spin/juke/truck are impulses: they set velocity outright.
       p.actual.copy(p.velocity);
     } else {
+      if (p.speedMul !== 1) desiredVel.multiplyScalar(p.speedMul);
       const dsq = desiredVel.lengthSq();
       const vsq = p.velocity.lengthSq();
       let rate = dsq >= vsq ? ACCEL : DECEL;
@@ -1893,7 +1903,7 @@ function step(dt) {
         : st.tier === TIERS.TURBO ? '#22c55e' : st.tier === TIERS.REGULAR ? '#eab308' : '#ef4444',
       gb ? `GAMEBREAKER ${style.active.toFixed(1)}s`
         : controlled.turboT > 0 ? `TURBO BOOST ${controlled.turboT.toFixed(1)}s`
-          : `${st.tier.toUpperCase()} ${Math.round(st.value)}`
+          : `${controlled.character?.name ?? ''} · ${st.tier.toUpperCase()} ${Math.round(st.value)}`
     );
   }
   ui.hud.setStyle(

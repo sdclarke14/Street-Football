@@ -139,7 +139,7 @@ function makeTargetIcon(letter) {
   return sprite;
 }
 
-export function createPlayer(assets, { team, color, redJersey = false, iconLetter = null }) {
+export function createPlayer(assets, { team, color, redJersey = false, iconLetter = null, build = null }) {
   const rig = cloneSkinned(assets.template);
   const kit = redJersey ? assets.redMap : assets.homeMap;
   rig.traverse((c) => {
@@ -151,8 +151,12 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
     c.material.map = kit;
     c.material.emissiveMap = kit;
   });
-  rig.scale.setScalar(assets.scale);
-  rig.position.y = assets.yOffset;
+  // Per-character build: height scales vertically, girth in X and Z, so a
+  // 5'6" kid and a 6'5" heavyweight read as different people on the field.
+  const bh = build?.height ?? 1;
+  const bg = build?.girth ?? 1;
+  rig.scale.set(assets.scale * bg, assets.scale * bh, assets.scale * bg);
+  rig.position.y = assets.yOffset * bh;
   rig.traverse((c) => {
     if (c.isMesh) c.castShadow = true;
   });
@@ -161,7 +165,13 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
   // The shell lives inside the rig's own scale, so the width has to be
   // divided by that scale to come out a fixed thickness on screen.
   toonifyTree(rig, { ramp: RAMPS.character });
-  addOutlines(rig, { color: 0x0e100f, width: 0.04 / assets.scale });
+  // The shell is pushed a fixed distance in rig-local space, so a wide
+  // character would get proportionally wider ink. Divide by the largest
+  // build factor to keep the outline an even weight across the roster.
+  addOutlines(rig, {
+    color: 0x0e100f,
+    width: 0.04 / (assets.scale * Math.max(bh, bg)),
+  });
 
   const group = new THREE.Group();
   group.add(rig);

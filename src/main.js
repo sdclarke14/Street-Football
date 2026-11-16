@@ -52,6 +52,15 @@ const DEF_SPEED = 7.1;
 const BLOCKER_SPEED = 6.4;
 const TURN_RATE = 12;
 const SEPARATION = 0.72;
+// Momentum. Every AI and input function writes a *desired* velocity each
+// frame; the real one chases it at these rates, so players build speed,
+// carry it through a cut and cannot reverse on a dime at full sprint.
+// Tunable: higher = snappier, lower = heavier. At DECEL 17 a sprinter
+// stopped in ~0.2s, which still read as a puppet; 12 gives ~0.35s.
+const ACCEL = 9;       // approach rate when speeding up
+const DECEL = 12;      // approach rate when slowing down
+const CUT_FLOOR = 0.42; // how much of the rate survives a full reversal
+const TURN_AT_SPEED = 0.52; // fraction of turn rate lost at top speed
 
 // Contact
 const TACKLE_DIST = 0.95;
@@ -542,6 +551,7 @@ function lineupPlay() {
   const reset = (p, x, z, facing) => {
     p.group.position.set(x, 0, z);
     p.velocity.set(0, 0, 0);
+    p.actual.set(0, 0, 0);
     p.heading = facing;
     p.group.rotation.y = facing;
     p.rig.rotation.set(0, 0, 0);
@@ -1468,6 +1478,7 @@ function buildTeams() {
         iconLetter: team === USER_TEAM ? TARGET_LETTERS[slot] ?? null : null,
       });
       p.slot = slot;
+      p.actual = new THREE.Vector3(); // real velocity, carried across frames
       p.stam = new StaminaMeter({ regularBelow: 60, gassedBelow: 25 });
       p.diveT = 0;
       p.blockedBy = null;
@@ -1563,6 +1574,7 @@ const desiredPos = new THREE.Vector3();
 const desiredLook = new THREE.Vector3();
 const reachTarget = new THREE.Vector3();
 const sep = new THREE.Vector3();
+const desiredVel = new THREE.Vector3();
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => step(Math.min(clock.getDelta(), 0.05)));
@@ -1623,6 +1635,11 @@ function step(dt) {
     if (p !== controlled) p.stam.update(dt, p.velocity.lengthSq() > 45);
     if (incapacitated(p)) p.velocity.set(0, 0, 0);
 
+    // What the AI or the stick asked for this frame...
+    desiredVel.copy(p.velocity);
+    // ...and the momentum actually being carried.
+    p.velocity.copy(p.actual);
+
     if (p.moveState) {
       const m = p.moveState;
       m.t += dt;
@@ -1641,9 +1658,29 @@ function step(dt) {
         p.burstT = BURST_DURATION;
         p.rig.rotation.z = 0;
       }
+      // Spin/juke/truck are impulses: they set velocity outright.
+      p.actual.copy(p.velocity);
+    } else {
+      const dsq = desiredVel.lengthSq();
+      const vsq = p.velocity.lengthSq();
+      let rate = dsq >= vsq ? ACCEL : DECEL;
+      if (dsq > 0.01 && vsq > 0.5) {
+        // Cutting against your own momentum is slow; running straight is not.
+        const dot =
+          (desiredVel.x * p.velocity.x + desiredVel.z * p.velocity.z) /
+          Math.sqrt(dsq * vsq);
+        rate *= CUT_FLOOR + (1 - CUT_FLOOR) * Math.max(0, dot);
+      }
+      rate *= world?.surface.grip ?? 1; // loose dirt bleeds grip
+      p.velocity.lerp(desiredVel, 1 - Math.exp(-rate * dt));
+      if (p.velocity.lengthSq() < 0.02) p.velocity.set(0, 0, 0);
+      p.actual.copy(p.velocity);
     }
 
-    if (phase !== 'live') p.velocity.set(0, 0, 0);
+    if (phase !== 'live') {
+      p.velocity.set(0, 0, 0);
+      p.actual.set(0, 0, 0);
+    }
     p.group.position.addScaledVector(p.velocity, dt);
     p.group.position.x = THREE.MathUtils.clamp(p.group.position.x, -BOUND_X, BOUND_X);
     p.group.position.z = THREE.MathUtils.clamp(p.group.position.z, -BOUND_Z, BOUND_Z);
@@ -1653,7 +1690,10 @@ function step(dt) {
       const targetHeading = Math.atan2(p.velocity.x, p.velocity.z);
       let delta = targetHeading - p.heading;
       delta = Math.atan2(Math.sin(delta), Math.cos(delta));
-      p.heading += THREE.MathUtils.clamp(delta, -TURN_RATE * dt, TURN_RATE * dt);
+      // A sprinting player turns in a wide arc; a walking one pivots.
+      const frac = Math.min(1, speed / SPRINT_SPEED[TIERS.TURBO]);
+      const turn = TURN_RATE * (1 - TURN_AT_SPEED * frac) * dt;
+      p.heading += THREE.MathUtils.clamp(delta, -turn, turn);
     }
     if (p.moveState?.type === 'spin') {
       p.group.rotation.y = p.heading + (p.moveState.t / p.moveState.dur) * Math.PI * 2;

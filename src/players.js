@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { TIERS } from './stamina.js';
 import { toonifyTree, addOutlines, RAMPS } from './toon.js';
+import { captureRig, createPoseState } from './anim.js';
 
 // All three GLBs share an identical 24-joint skeleton (verified), so the
 // turbo/regular clips bind by bone name onto clones of the base rig.
@@ -205,6 +206,11 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
     heading: 0,
     touchCooldown: 0,
     home: new THREE.Vector3(),
+    // Procedural pose overlays: the rig has only run cycles, so idle,
+    // throw, catch, dive and celebrate are solved on top of it.
+    poseRefs: captureRig(rig),
+    pose: createPoseState(),
+    poseOffset: Math.random() * 10, // desync the breathing
     // bones for ball socketing and procedural catch-reach
     hand: rig.getObjectByName('RightHand'),
     arms: {

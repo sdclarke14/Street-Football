@@ -13,6 +13,7 @@ import { createUI } from './ui.js';
 import { createTouchControls, lockViewport } from './touch.js';
 import { createAudio } from './audio.js';
 import { toonify, addOutlines, RAMPS } from './toon.js';
+import { applyPose, stepPose, playPose } from './anim.js';
 import {
   SLOT, ROSTER_SIZE, TARGET_SLOTS, TARGET_KEYS, TARGET_LETTERS,
   OFFENSE_PLAYS, DEFENSE_PLAYS, ZONE_SPOTS,
@@ -393,6 +394,7 @@ function startMove(p, type) {
   const dur = type === 'spin' ? SPIN_DURATION : type === 'truck' ? TRUCK_DURATION : JUKE_DURATION;
   p.moveState = { type, t: 0, dur, dir };
   p.moveCooldown = MOVE_COOLDOWN;
+  if (type === 'truck') playPose(p.pose, 'truck');
   if (type === 'truck') p.stam.value = Math.max(0, p.stam.value - 18);
 
   let sold = false;
@@ -692,6 +694,7 @@ function throwToReceiver(wr, lob = false) {
   target.x += (Math.random() - 0.5) * err * 2.2;
   target.z += (Math.random() - 0.5) * err * 2.6;
 
+  if (qb) playPose(qb.pose, 'throw');
   throwBall(ball, from, target, flightTime, wr);
   play.thrown = true;
   play.clockRunning = false;
@@ -855,6 +858,7 @@ function onHazardHit(hazard, victim) {
 function tryStartTackle(defender, carrier) {
   if (play.tackle || defender.tackleCooldown > 0 || incapacitated(defender)) return;
   play.tackle = { defender, t: TACKLE_WINDOW, sprintHeld: false };
+  playPose(defender.pose, 'dive');
   fx.hitFlash(carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1), 0.9);
   hitStop(0.04);
   audio.hit(0.7);
@@ -1376,6 +1380,7 @@ function updateLivePlay(dt) {
     if (ball.airTime > 0.1 && ball.mesh.position.distanceTo(scratch) < reach) {
       holdBall(ball, wr);
       if (!play.snapping) {
+        playPose(wr.pose, 'catch');
         audio.catchBall();
         cheer(0.5);
         if (wr.team === USER_TEAM) addStyle(STYLE.completion);
@@ -1399,6 +1404,7 @@ function updateLivePlay(dt) {
     const carrierAttack = ATTACK_DIR[carrierTeam];
     const cx = carrier.group.position.x;
     if (carrierAttack * cx >= FIELD.halfLength) {
+      playPose(carrier.pose, 'celebrate'); // before freezePlay clears the carrier
       if (conversion && !returning) {
         freezePlay();
         showBanner('CONVERSION GOOD!', `+${conversion.points}`);
@@ -1541,6 +1547,8 @@ loadPlayerAssets().then((loaded) => {
   boot?.classList.add('gone');
   setTimeout(() => boot?.remove(), 500);
   window.__game = {
+    THREE, // debug handle: lets a harness build vectors in page context
+    anim: { applyPose, stepPose, playPose }, // pose preview harness
     players, ball, drive, score, meta, play, style, powerups, renderer, scene, camera,
     snap, newGame, step,
     get phase() { return phase; },
@@ -1575,6 +1583,7 @@ const desiredLook = new THREE.Vector3();
 const reachTarget = new THREE.Vector3();
 const sep = new THREE.Vector3();
 const desiredVel = new THREE.Vector3();
+const rigQuat = new THREE.Quaternion();
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => step(Math.min(clock.getDelta(), 0.05)));
@@ -1714,6 +1723,18 @@ function step(dt) {
       p === controlled ? tier : p.turboT > 0 ? TIERS.TURBO : p.stam.tier;
     updatePlayerClip(p, clipTier, p.stunT > 0 ? 0 : speed);
     p.mixer.update(dt);
+
+    // Pose overlay. A paused run clip still writes its frozen stride, so a
+    // standing player used to be a runner mid-step; idle/brace solve over it.
+    const poseOut = stepPose(p.pose, dt, {
+      wantIdle: speed < 0.45 && p.stunT <= 0,
+      idleName: phase === 'lineup' ? 'brace' : 'idle',
+      clock: clock.elapsedTime + p.poseOffset,
+    });
+    if (poseOut) {
+      p.rig.getWorldQuaternion(rigQuat);
+      applyPose(p.poseRefs, poseOut.map, rigQuat, poseOut.weight);
+    }
 
     if (ball.state === 'thrown' && ball.intended === p) {
       const d = ball.mesh.position.distanceTo(p.group.position);

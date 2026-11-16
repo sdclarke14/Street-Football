@@ -1,4 +1,5 @@
 import { drawPlayDiagram, drawDefenseDiagram, PLAY_GROUPS, DEFENSE_PLAYS } from './playbook.js';
+import { POSITIONS } from './roster.js';
 
 // All menus and the in-game HUD. Everything is DOM over the canvas so it
 // stays crisp on a retina phone and costs the renderer nothing.
@@ -78,6 +79,63 @@ const CSS = `
 #ui-playcall .card canvas { width: 100%; display: block; background: #17201c; }
 #ui-playcall .card .nm { font-weight: 900; font-size: 12px; letter-spacing: 0.4px; padding: 6px 8px 0; }
 #ui-playcall .card .tg { font-size: 9px; font-weight: 800; letter-spacing: 1px; color: var(--acid); padding: 1px 8px 7px; }
+
+/* ---- Draft ---- */
+#ui-draft { background: #101713; }
+#ui-draft .dbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: calc(8px + var(--sat,0px)) calc(14px + var(--sar,0px)) 6px calc(14px + var(--sal,0px));
+  border-bottom: 1px solid rgba(255,255,255,0.1); }
+#ui-draft .dtitle { font-weight: 900; font-size: clamp(13px,2.2vw,20px); letter-spacing: 1px; }
+#ui-draft .dtitle span { color: var(--acid); }
+#ui-draft .clock { font-size: 10px; font-weight: 900; letter-spacing: 1.5px; padding: 4px 10px;
+  border-radius: 999px; background: rgba(185,242,39,0.2); color: var(--acid); }
+#ui-draft .clock.them { background: rgba(255,107,107,0.2); color: #ff8f8f; }
+#ui-draft .onpos { font-weight: 900; font-size: clamp(12px,2vw,17px); color: #ffd54a; letter-spacing: 0.5px; }
+#ui-draft .dcount { margin-left: auto; font-size: 11px; font-weight: 800; opacity: 0.7; letter-spacing: 1px; }
+#ui-draft .dauto { pointer-events: auto; cursor: pointer; padding: 6px 13px; border-radius: 999px;
+  font-size: 10px; font-weight: 900; letter-spacing: 1.2px; background: rgba(255,255,255,0.12); }
+#ui-draft .squads { display: flex; gap: 8px; padding: 6px calc(14px + var(--sal,0px)); }
+#ui-draft .squad { flex: 1; display: flex; gap: 4px; min-width: 0; }
+#ui-draft .squad .lbl { font-size: 9px; font-weight: 900; letter-spacing: 1.2px; writing-mode: vertical-rl;
+  transform: rotate(180deg); opacity: 0.55; }
+#ui-draft .slot { flex: 1; min-width: 0; border-radius: 7px; background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12); padding: 3px 4px; text-align: center; overflow: hidden; }
+#ui-draft .slot.filled { background: rgba(185,242,39,0.14); border-color: rgba(185,242,39,0.5); }
+#ui-draft .squad.them .slot.filled { background: rgba(255,107,107,0.14); border-color: rgba(255,107,107,0.5); }
+#ui-draft .slot .pos { font-size: 8px; font-weight: 900; letter-spacing: 1px; opacity: 0.6; }
+#ui-draft .slot .who { font-size: 9px; font-weight: 800; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+#ui-draft .slot.onclock { border-color: #ffd54a; box-shadow: 0 0 10px rgba(255,213,74,0.45); }
+#ui-draft .pool { flex: 1; display: grid; gap: 8px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); align-content: start;
+  /* Fixed row height: auto rows collapsed to well under the card's own
+     content and overflow:hidden then ate the name, tags and bars. */
+  grid-auto-rows: 172px;
+  padding: 6px calc(14px + var(--sar,0px)) calc(10px + var(--sab,0px)) calc(14px + var(--sal,0px)); }
+/* Explicit heights, not aspect-ratio: inside this scrolling grid the ratio
+   never resolved and the cards collapsed onto the portrait, cutting off the
+   name, the strength, the flaw and the bars. */
+#ui-draft .pc { cursor: pointer; border-radius: 10px; overflow: hidden; background: #17201c;
+  border: 2px solid rgba(255,255,255,0.12); transition: transform 0.1s, border-color 0.1s;
+  position: relative; display: flex; flex-direction: column; }
+#ui-draft .pc:active { transform: scale(0.96); }
+#ui-draft .pc.hot { border-color: var(--acid); box-shadow: 0 0 12px rgba(185,242,39,0.35); }
+#ui-draft .pc .pic { width: 100%; height: 104px; flex: none; background-size: cover;
+  background-position: center 16%; background-color: #2a2f2c; display: block; }
+#ui-draft .pc .nm { font-weight: 900; font-size: 11px; padding: 4px 6px 0; letter-spacing: 0.3px; }
+#ui-draft .pc .tag { font-size: 8px; font-weight: 800; letter-spacing: 0.4px; padding: 0 6px; line-height: 1.35; }
+#ui-draft .pc .good { color: var(--acid); }
+#ui-draft .pc .bad { color: #ff8f8f; padding-bottom: 4px; }
+#ui-draft .pc .bars { display: flex; gap: 2px; padding: 3px 6px 6px; }
+#ui-draft .pc .bar { flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.14); overflow: hidden; }
+#ui-draft .pc .bar i { display: block; height: 100%; background: #9fd8ff; }
+#ui-draft .pc .fit { position: absolute; top: 5px; right: 5px; font-size: 8px; font-weight: 900;
+  padding: 2px 5px; border-radius: 999px; background: rgba(0,0,0,0.6); letter-spacing: 0.5px; }
+#ui-draft .pc .fit.best { background: var(--acid); color: #10130f; }
+#ui-draft .kit { position: absolute; top: 5px; left: 5px; width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid rgba(0,0,0,0.6); }
+#ui-draft .taken { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(10,14,12,0.78); font-weight: 900; font-size: 10px; letter-spacing: 1.5px; color: #ff8f8f; }
 
 /* ---- HUD ---- */
 #ui-hud { position: absolute; inset: 0; pointer-events: none; display: none; }
@@ -163,6 +221,21 @@ export function createUI({ surfaces, art }) {
       </div>
       <div class="tabs" id="pc-tabs"></div>
       <div class="grid" id="pc-grid" data-scrollable></div>
+    </div>
+
+    <div class="screen" id="ui-draft">
+      <div class="dbar">
+        <div class="dtitle">THE <span>DRAFT</span></div>
+        <div class="clock" id="d-clock">YOUR PICK</div>
+        <div class="onpos" id="d-pos"></div>
+        <div class="dcount" id="d-count"></div>
+        <div class="dauto" id="d-auto">AUTO DRAFT</div>
+      </div>
+      <div class="squads">
+        <div class="squad us" id="d-us"></div>
+        <div class="squad them" id="d-them"></div>
+      </div>
+      <div class="pool" id="d-pool" data-scrollable></div>
     </div>
 
     <div id="ui-hud">
@@ -294,8 +367,66 @@ export function createUI({ surfaces, art }) {
     }
   }
 
+  // ---- Draft ----
+  // Rendered from the draft object every pick; the board is the state.
+  const SHOWN_ATTRS = ['speed', 'power', 'hands'];
+  function renderDraft(draft, { onPick, onAuto }) {
+    const mine = draft.turn === 'home';
+    const pos = draft.position;
+    $('d-clock').textContent = draft.done ? 'DRAFT OVER' : mine ? 'YOUR PICK' : 'THEIR PICK';
+    $('d-clock').classList.toggle('them', !mine && !draft.done);
+    $('d-pos').textContent = draft.done ? '' : `ON THE CLOCK · ${pos.name}`;
+    $('d-count').textContent = `PICK ${draft.pickNumber} OF ${draft.totalPicks}`;
+
+    const strip = (squad, host, isUs) => {
+      host.innerHTML =
+        `<div class="lbl">${isUs ? 'YOU' : 'THEM'}</div>` +
+        POSITIONS.map((p, i) => {
+          const c = squad[i];
+          const onclock = !draft.done && i === squad.length && (isUs === (draft.turn === 'home'));
+          return `<div class="slot ${c ? 'filled' : ''} ${onclock ? 'onclock' : ''}">
+              <div class="pos">${p.key}</div>
+              <div class="who">${c ? c.name : '—'}</div>
+            </div>`;
+        }).join('');
+    };
+    strip(draft.home, $('d-us'), true);
+    strip(draft.away, $('d-them'), false);
+
+    // Best fit in the pool for the position on the clock, to flag the card.
+    let bestFit = 0;
+    for (const c of draft.pool) bestFit = Math.max(bestFit, draft.fit(c));
+
+    const pool = $('d-pool');
+    pool.innerHTML = draft.pool
+      .map((c) => {
+        const fit = draft.fit(c);
+        const isBest = fit >= bestFit - 0.001;
+        const bars = SHOWN_ATTRS.map(
+          (k) => `<div class="bar"><i style="width:${c.attr[k]}%"></i></div>`
+        ).join('');
+        return `<div class="pc ${isBest && mine ? 'hot' : ''}" data-id="${c.id}">
+            <span class="kit" style="background:${c.kit}"></span>
+            <span class="fit ${isBest ? 'best' : ''}">${Math.round(fit * 100)}</span>
+            <div class="pic" style="background-image:url(${art.cards[c.art]})"></div>
+            <div class="nm">${c.name}</div>
+            <div class="tag good">${c.best}</div>
+            <div class="tag bad">${c.flaw}</div>
+            <div class="bars">${bars}</div>
+          </div>`;
+      })
+      .join('');
+    pool.onclick = (e) => {
+      if (!mine || draft.done) return;
+      const card = e.target.closest('.pc');
+      if (!card) return;
+      onPick(draft.pool.find((c) => c.id === card.dataset.id));
+    };
+    $('d-auto').onclick = () => onAuto();
+  }
+
   // ---- Screens ----
-  const screens = ['ui-title', 'ui-playcall', 'ui-result'];
+  const screens = ['ui-title', 'ui-draft', 'ui-playcall', 'ui-result'];
   function show(which) {
     for (const s of screens) $(s).classList.toggle('on', s === which);
     $('ui-hud').classList.toggle('on', which === null);
@@ -374,6 +505,13 @@ export function createUI({ surfaces, art }) {
     hud,
     showTitle: () => show('ui-title'),
     showGame: () => show(null),
+    showDraft(draft, handlers) {
+      renderDraft(draft, handlers);
+      show('ui-draft');
+    },
+    refreshDraft(draft, handlers) {
+      renderDraft(draft, handlers);
+    },
     showPlayCall(cfg) {
       renderPlayCall(cfg);
       show('ui-playcall');

@@ -94,8 +94,13 @@ export function ensureSmoothNormals(geometry) {
 
 function outlineMaterial(color, width) {
   const mat = new THREE.MeshBasicMaterial({ color, side: THREE.BackSide });
+  // One uniform object owned by the material, so the width can be changed
+  // before or after the shader compiles — a player's build can change when
+  // a new character is drafted onto him.
+  const uniform = { value: width };
+  mat.userData.outlineUniform = uniform;
   mat.onBeforeCompile = (shader) => {
-    shader.uniforms.outlineWidth = { value: width };
+    shader.uniforms.outlineWidth = uniform;
     shader.vertexShader =
       `uniform float outlineWidth;\nattribute vec3 ${SMOOTH_ATTR};\n` +
       shader.vertexShader.replace(
@@ -107,7 +112,6 @@ function outlineMaterial(color, width) {
       );
     mat.userData.shader = shader;
   };
-  mat.userData.outlineWidth = width;
   return mat;
 }
 
@@ -144,6 +148,14 @@ export function addOutlines(root, { color = 0x0d0f0e, width = 0.018 } = {}) {
     shells.push(shell);
   }
   return shells;
+}
+
+export function setOutlineWidth(root, width) {
+  root.traverse((c) => {
+    if (c.userData.isOutline && c.material?.userData?.outlineUniform) {
+      c.material.userData.outlineUniform.value = width;
+    }
+  });
 }
 
 export const RAMPS = { character: RAMP_CHARACTER, world: RAMP_WORLD };

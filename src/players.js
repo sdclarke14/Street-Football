@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { TIERS } from './stamina.js';
-import { toonifyTree, addOutlines, RAMPS } from './toon.js';
+import { toonifyTree, addOutlines, RAMPS, setOutlineWidth } from './toon.js';
 import { captureRig, createPoseState } from './anim.js';
+import { toMultipliers } from './roster.js';
 
 // All three GLBs share an identical 24-joint skeleton (verified), so the
 // turbo/regular clips bind by bone name onto clones of the base rig.
@@ -151,27 +152,18 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
     c.material.map = kit;
     c.material.emissiveMap = kit;
   });
-  // Per-character build: height scales vertically, girth in X and Z, so a
-  // 5'6" kid and a 6'5" heavyweight read as different people on the field.
   const bh = build?.height ?? 1;
   const bg = build?.girth ?? 1;
-  rig.scale.set(assets.scale * bg, assets.scale * bh, assets.scale * bg);
-  rig.position.y = assets.yOffset * bh;
   rig.traverse((c) => {
     if (c.isMesh) c.castShadow = true;
   });
 
   // Cel pass: hard-banded toon ramp, then an inverted-hull ink outline.
+  // Build scaling is applied by applyBuild() once the rig exists.
   // The shell lives inside the rig's own scale, so the width has to be
   // divided by that scale to come out a fixed thickness on screen.
   toonifyTree(rig, { ramp: RAMPS.character });
-  // The shell is pushed a fixed distance in rig-local space, so a wide
-  // character would get proportionally wider ink. Divide by the largest
-  // build factor to keep the outline an even weight across the roster.
-  addOutlines(rig, {
-    color: 0x0e100f,
-    width: 0.04 / (assets.scale * Math.max(bh, bg)),
-  });
+  addOutlines(rig, { color: 0x0e100f, width: 0.04 / assets.scale });
 
   const group = new THREE.Group();
   group.add(rig);
@@ -221,7 +213,7 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
     poseRefs: captureRig(rig),
     pose: createPoseState(),
     poseOffset: Math.random() * 10, // desync the breathing
-    restRigY: rig.position.y, // restored when a knocked-down player gets up
+    restRigY: assets.yOffset, // restored when a knocked-down player gets up
     down: false,
     downT: 0,
     fallDir: 1,
@@ -245,6 +237,26 @@ export function createPlayer(assets, { team, color, redJersey = false, iconLette
     moveState: null, // { type: 'spin'|'juke', t, dur, dir }
     burstT: 0, // momentum burst coming out of a move
   };
+}
+
+// Re-shape an existing player to a character's build. Called when a squad
+// is drafted, so the 14 rigs are built once and re-used rather than cloned
+// again every game.
+export function applyBuild(player, assets, character) {
+  const bh = character?.build?.height ?? 1;
+  const bg = character?.build?.girth ?? 1;
+  player.rig.scale.set(assets.scale * bg, assets.scale * bh, assets.scale * bg);
+  player.rig.position.y = assets.yOffset * bh;
+  player.restRigY = player.rig.position.y;
+  // The shell is pushed a fixed distance in rig-local space, so a wide
+  // character would get proportionally wider ink. Divide by the largest
+  // build factor to keep the outline an even weight across the roster.
+  setOutlineWidth(player.rig, 0.04 / (assets.scale * Math.max(bh, bg)));
+  player.character = character;
+  Object.assign(player, toMultipliers(character));
+  // Stamina is a per-character trait too: who can keep the turbo down.
+  player.stam.drainRate = 22 / player.staminaMul;
+  player.stam.regenRate = 14 * player.staminaMul;
 }
 
 // Aim a bone (world-space) so it points from its joint toward targetWorld.

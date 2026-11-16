@@ -1,58 +1,121 @@
 // The 21-character roster.
 //
-// Kit colours were sampled straight out of the generated character art
-// (torso band, dominant saturated colour, skin and backdrop filtered out),
-// so the palette comes from the images rather than being invented here. Two
-// The automatic sample got 17 of 21. Four defeated it and are corrected by
-// hand: BIG MAN and LIL MAN have bare shoulders so the sampler returned skin,
-// TOWER's tank is black at the shoulder, and SHADE's hoodie read as brown
-// leather off the ball he is holding.
+// Kit colours are sampled out of the generated character art (two shoulder
+// strips either side of where the ball is held, skin and leather hues
+// filtered). The sampler got 17 of 21; BIG MAN and LIL MAN have bare
+// shoulders so it returned skin, TOWER's tank is black at the shoulder, and
+// SHADE's hoodie read as the brown of the ball. Those four are set by hand.
 //
-// build.height scales the rig vertically, build.girth scales it in X and Z.
-// speed and power are modifiers, both 1.0 for an average player: speed
-// multiplies the velocity a player asks for, power helps him break tackles.
+// Every character is rated 0-100 on eight attributes, and every rating
+// drives something you can feel on the field — see ATTR_RANGES below for
+// exactly what each one moves. Each also carries one standout and one real
+// flaw, so a pick is a trade rather than a ranking.
 
+// attribute -> [value at rating 0, value at rating 100] as a multiplier on
+// the game's base figure.
+export const ATTR_RANGES = {
+  speed:    [0.80, 1.20], // top speed
+  accel:    [0.70, 1.30], // how fast he gets there, and how fast he stops
+  agility:  [0.78, 1.26], // turning, and how well a juke or spin sells
+  power:    [0.70, 1.34], // breaking tackles, and trucking
+  tackling: [0.72, 1.30], // making a tackle stick when he is the one hitting
+  blocking: [0.65, 1.35], // holding a block
+  hands:    [0.82, 1.22], // catch radius; low hands also drop passes
+  stamina:  [0.72, 1.28], // turbo drain and recovery
+};
+
+export const ATTR_KEYS = Object.keys(ATTR_RANGES);
+
+// Rating (0-100) to the multiplier the game actually uses.
+export function mul(attr, rating) {
+  const [lo, hi] = ATTR_RANGES[attr];
+  return lo + (hi - lo) * Math.max(0, Math.min(100, rating)) / 100;
+}
+
+const C = (id, name, art, kit, height, girth, a, best, flaw) => ({
+  id, name, art, kit,
+  build: { height, girth },
+  attr: {
+    speed: a[0], accel: a[1], agility: a[2], power: a[3],
+    tackling: a[4], blocking: a[5], hands: a[6], stamina: a[7],
+  },
+  best, flaw,
+});
+
+//                id            name       art                 kit        h     g     [spd acc agi pow tkl blk hnd sta]
 export const CHARACTERS = [
-  { id: 'speedster',   name: 'FLASH',    art: '01-speedster',    kit: '#4c9e16', build: { height: 1.00, girth: 0.88 }, speed: 1.10, power: 0.82 },
-  { id: 'tall',        name: 'STRETCH',  art: '02-tall-receiver', kit: '#ea4f09', build: { height: 1.10, girth: 0.84 }, speed: 1.05, power: 0.88 },
-  { id: 'bruiser',     name: 'TANK',     art: '03-bruiser',      kit: '#2d2e4c', build: { height: 0.93, girth: 1.22 }, speed: 0.90, power: 1.24 },
-  { id: 'qb',          name: 'CAP',      art: '04-quarterback',  kit: '#cf1317', build: { height: 1.02, girth: 1.00 }, speed: 1.00, power: 1.00 },
-  { id: 'bigman',      name: 'HOUSE',    art: '05-big-man',      kit: '#9aa3ad', build: { height: 1.06, girth: 1.38 }, speed: 0.82, power: 1.35 },
-  { id: 'kid',         name: 'LIL MAN',  art: '06-kid',          kit: '#e8c927', build: { height: 0.86, girth: 0.82 }, speed: 1.12, power: 0.70 },
-  { id: 'veteran',     name: 'POPS',     art: '07-veteran',      kit: '#713324', build: { height: 1.00, girth: 1.12 }, speed: 0.92, power: 1.12 },
-  { id: 'showman',     name: 'FLEX',     art: '08-showman',      kit: '#9405ae', build: { height: 1.02, girth: 0.98 }, speed: 1.04, power: 0.96 },
-  { id: 'throwback',   name: 'LEATHER',  art: '09-throwback',    kit: '#fee9b7', build: { height: 0.99, girth: 1.18 }, speed: 0.93, power: 1.18 },
-  { id: 'punk',        name: 'SPIKE',    art: '10-punk',         kit: '#4175a6', build: { height: 1.00, girth: 0.95 }, speed: 1.03, power: 0.98 },
-  { id: 'sprinter',    name: 'JETS',     art: '11-sprinter',     kit: '#028c8f', build: { height: 1.02, girth: 0.90 }, speed: 1.12, power: 0.84 },
-  { id: 'shirtless',   name: 'BRICK',    art: '12-shirtless',    kit: '#e69a61', build: { height: 1.05, girth: 1.30 }, speed: 0.86, power: 1.30 },
-  { id: 'hoodie',      name: 'SHADE',    art: '13-hoodie',       kit: '#3a3f44', build: { height: 1.00, girth: 1.02 }, speed: 1.00, power: 1.02 },
-  { id: 'classic',     name: 'DUKE',     art: '14-classic',      kit: '#094a99', build: { height: 1.01, girth: 1.00 }, speed: 1.00, power: 1.00 },
-  { id: 'hooper',      name: 'TOWER',    art: '15-hooper',       kit: '#feca0a', build: { height: 1.12, girth: 0.82 }, speed: 1.02, power: 0.88 },
-  { id: 'worker',      name: 'BOOTS',    art: '16-working-man',  kit: '#d26a2d', build: { height: 0.95, girth: 1.15 }, speed: 0.92, power: 1.14 },
-  { id: 'technician',  name: 'WIRE',     art: '17-technician',   kit: '#efeef4', build: { height: 0.99, girth: 0.92 }, speed: 1.06, power: 0.90 },
-  { id: 'puffer',      name: 'BULK',     art: '18-puffer',       kit: '#c4271c', build: { height: 1.03, girth: 1.26 }, speed: 0.88, power: 1.26 },
-  { id: 'pinnie',      name: 'STUB',     art: '19-pinnie',       kit: '#fed404', build: { height: 0.92, girth: 1.10 }, speed: 0.96, power: 1.10 },
-  { id: 'rugby',       name: 'SCRUM',    art: '20-rugby',        kit: '#192b55', build: { height: 1.01, girth: 1.24 }, speed: 0.90, power: 1.28 },
-  { id: 'keeper',      name: 'REACH',    art: '21-keeper',       kit: '#9ad911', build: { height: 1.06, girth: 0.90 }, speed: 1.01, power: 0.94 },
+  C('speedster',  'FLASH',   '01-speedster',     '#4c9e16', 1.00, 0.88, [96, 92, 88, 30, 35, 25, 68, 60], 'TOP-END SPEED',     'GETS BULLIED'),
+  C('tall',       'STRETCH', '02-tall-receiver', '#ea4f09', 1.14, 0.84, [82, 70, 60, 45, 40, 35, 94, 65], 'CATCH RADIUS',      'SLOW OFF THE LINE'),
+  C('bruiser',    'TANK',    '03-bruiser',       '#2d2e4c', 0.90, 1.22, [48, 62, 40, 92, 88, 90, 40, 70], 'WRECKING BALL',     'NO SPEED'),
+  C('qb',         'CAP',     '04-quarterback',   '#cf1317', 1.02, 1.00, [65, 68, 70, 58, 45, 45, 80, 80], 'STEADY HANDS',      'AVERAGE EVERYWHERE'),
+  C('bigman',     'HOUSE',   '05-big-man',       '#9aa3ad', 1.08, 1.40, [32, 40, 25, 99, 92, 99, 35, 45], 'IMMOVABLE',         'GASSES FAST'),
+  C('kid',        'LIL MAN', '06-kid',           '#e8c927', 0.82, 0.80, [92, 96, 95, 18, 25, 15, 72, 85], 'UNTOUCHABLE JUKE',  'NO STRENGTH'),
+  C('veteran',    'POPS',    '07-veteran',       '#713324', 1.00, 1.12, [52, 55, 58, 70, 82, 78, 85, 50], 'READS EVERYTHING',  'LEGS ARE GONE'),
+  C('showman',    'FLEX',    '08-showman',       '#9405ae', 1.02, 0.98, [84, 80, 86, 55, 50, 40, 78, 62], 'SHOWSTOPPER',       'ALL FLASH'),
+  C('throwback',  'LEATHER', '09-throwback',     '#fee9b7', 0.98, 1.18, [55, 60, 45, 84, 86, 88, 55, 90], 'NEVER TIRES',       'STONE HANDS'),
+  C('punk',       'SPIKE',   '10-punk',          '#4175a6', 1.00, 0.95, [78, 82, 76, 66, 72, 55, 60, 68], 'PLAYS DIRTY',       'UNDISCIPLINED'),
+  C('sprinter',   'JETS',    '11-sprinter',      '#028c8f', 1.03, 0.90, [99, 88, 70, 35, 30, 28, 62, 55], 'FASTEST ON THE LOT','ONE TRICK'),
+  C('shirtless',  'BRICK',   '12-shirtless',     '#e69a61', 1.06, 1.32, [44, 58, 35, 96, 90, 94, 38, 58], 'TRUCKS ANYONE',     'CANNOT CUT'),
+  C('hoodie',     'SHADE',   '13-hoodie',        '#3a3f44', 1.00, 1.02, [72, 74, 72, 64, 68, 62, 70, 72], 'NO WEAKNESS',       'NO STANDOUT'),
+  C('classic',    'DUKE',    '14-classic',       '#094a99', 1.01, 1.00, [70, 72, 66, 68, 70, 72, 82, 75], 'RELIABLE',          'NEVER SPECTACULAR'),
+  C('hooper',     'TOWER',   '15-hooper',        '#feca0a', 1.16, 0.82, [76, 64, 55, 48, 44, 42, 97, 60], 'WINS JUMP BALLS',   'PUSHED OFF ROUTES'),
+  C('worker',     'BOOTS',   '16-working-man',   '#d26a2d', 0.94, 1.15, [50, 66, 48, 82, 84, 86, 52, 95], 'WORKS ALL DAY',     'HEAVY FEET'),
+  C('technician', 'WIRE',    '17-technician',    '#efeef4', 0.99, 0.92, [80, 86, 90, 42, 48, 38, 76, 70], 'ROUTE TECHNICIAN',  'LIGHT FRAME'),
+  C('puffer',     'BULK',    '18-puffer',        '#c4271c', 1.04, 1.28, [46, 52, 38, 90, 86, 92, 44, 54], 'ROAD GRADER',       'SLOW TO TURN'),
+  C('pinnie',     'STUB',    '19-pinnie',        '#fed404', 0.88, 1.10, [62, 78, 68, 76, 78, 80, 56, 82], 'LOW CENTRE OF GRAVITY', 'SHORT REACH'),
+  C('rugby',      'SCRUM',   '20-rugby',         '#192b55', 1.01, 1.26, [54, 60, 42, 94, 96, 90, 46, 78], 'BEST TACKLER',      'CANNOT CATCH'),
+  C('keeper',     'REACH',   '21-keeper',        '#9ad911', 1.09, 0.90, [74, 68, 64, 52, 58, 48, 92, 66], 'GLUE HANDS',        'AVOIDS CONTACT'),
 ];
 
 export const byId = (id) => CHARACTERS.find((c) => c.id === id);
 
-// Deal two teams out of the roster without repeats. The quarterback slot
-// gets a balanced build so the position isn't randomly a 5'6" kid.
-export function dealTeams(size = 7) {
-  const pool = [...CHARACTERS];
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = (Math.random() * (i + 1)) | 0;
-    [pool[i], pool[j]] = [pool[j], pool[i]];
-  }
-  const pickQB = (list) => {
-    const i = list.findIndex((c) => c.speed >= 0.95 && c.power >= 0.9 && c.build.girth < 1.2);
-    return list.splice(i < 0 ? 0 : i, 1)[0];
+// Turn ratings into the multipliers the simulation reads, once, at draft
+// time. Height also buys a little reach on a catch — a 6'5" receiver should
+// come down with balls a 5'6" one cannot.
+export function toMultipliers(character) {
+  const a = character.attr;
+  return {
+    speedMul: mul('speed', a.speed),
+    accelMul: mul('accel', a.accel),
+    agilityMul: mul('agility', a.agility),
+    powerMul: mul('power', a.power),
+    tackleMul: mul('tackling', a.tackling),
+    blockMul: mul('blocking', a.blocking),
+    handsMul: mul('hands', a.hands) * (0.9 + character.build.height * 0.1),
+    staminaMul: mul('stamina', a.stamina),
+    dropChance: Math.max(0, (70 - a.hands) / 100) * 0.35,
   };
-  const home = [pickQB(pool)];
-  const away = [pickQB(pool)];
-  while (home.length < size) home.push(pool.pop());
-  while (away.length < size) away.push(pool.pop());
-  return { home, away };
+}
+
+// What each roster position wants, as weights over the attributes. Drives
+// both the CPU's draft logic and the fit badge on a draft card.
+export const POSITIONS = [
+  { slot: 0, key: 'QB', name: 'QUARTERBACK', wants: { hands: 2, agility: 1.5, speed: 1, stamina: 1 } },
+  { slot: 1, key: 'C',  name: 'CENTER',      wants: { blocking: 3, power: 2, tackling: 1 } },
+  { slot: 2, key: 'RB', name: 'RUNNING BACK',wants: { power: 2, accel: 2, agility: 1.5, speed: 1.5 } },
+  { slot: 3, key: 'TE', name: 'TIGHT END',   wants: { blocking: 1.5, hands: 2, power: 1.5 } },
+  { slot: 4, key: 'X',  name: 'WIDE OUT X',  wants: { speed: 2.5, hands: 2, accel: 1 } },
+  { slot: 5, key: 'Y',  name: 'SLOT Y',      wants: { agility: 2.5, accel: 2, hands: 1.5 } },
+  { slot: 6, key: 'Z',  name: 'WIDE OUT Z',  wants: { speed: 2.5, hands: 1.5, agility: 1.5 } },
+];
+
+// 0..1 fit of a character for a position.
+export function fitFor(character, position) {
+  let total = 0;
+  let weight = 0;
+  for (const [k, w] of Object.entries(position.wants)) {
+    total += (character.attr[k] / 100) * w;
+    weight += w;
+  }
+  return total / weight;
+}
+
+export function bestAvailable(pool, position) {
+  let best = pool[0];
+  let bestFit = -1;
+  for (const c of pool) {
+    const f = fitFor(c, position) + Math.random() * 0.05; // a little noise
+    if (f > bestFit) { bestFit = f; best = c; }
+  }
+  return best;
 }

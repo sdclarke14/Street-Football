@@ -6,7 +6,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { StaminaMeter, TIERS } from './stamina.js';
 import { FIELD, buildWorld, createDriveLines, SURFACES } from './field.js';
 import { createBall, holdBall, throwBall, updateBall } from './ball.js';
-import { loadPlayerAssets, createPlayer, updatePlayerClip, aimBone } from './players.js';
+import { loadPlayerAssets, createPlayer, updatePlayerClip, aimBone, applyBuild } from './players.js';
 import { createPowerups } from './powerups.js';
 import { createFX } from './effects.js';
 import { createUI } from './ui.js';
@@ -14,7 +14,8 @@ import { createTouchControls, lockViewport } from './touch.js';
 import { createAudio } from './audio.js';
 import { toonify, addOutlines, RAMPS } from './toon.js';
 import { applyPose, stepPose, playPose } from './anim.js';
-import { dealTeams } from './roster.js';
+import { CHARACTERS } from './roster.js';
+import { createDraft } from './draft.js';
 import {
   SLOT, ROSTER_SIZE, TARGET_SLOTS, TARGET_KEYS, TARGET_LETTERS,
   OFFENSE_PLAYS, DEFENSE_PLAYS, ZONE_SPOTS,
@@ -192,6 +193,9 @@ const ui = createUI({
       concrete: `${BASE}art/thumb-field-concrete.jpg`,
       dirt: `${BASE}art/thumb-field-dirt.jpg`,
     },
+    cards: Object.fromEntries(
+      CHARACTERS.map((c) => [c.art, `${BASE}art/roster/card-${c.art}.jpg`])
+    ),
   },
 });
 
@@ -407,10 +411,10 @@ function startMove(p, type) {
   for (const d of players) {
     if (d.team === p.team || incapacitated(d)) continue;
     const dist = d.group.position.distanceTo(p.group.position);
-    if (dist > MOVE_SELL_RADIUS) continue;
+    if (dist > MOVE_SELL_RADIUS * p.agilityMul) continue;
     if (type === 'truck') {
       // Power move: run through the guy instead of around him.
-      if (dist < 2.0) {
+      if (dist < 2.0 && p.powerMul > d.tackleMul * 0.85) {
         knockDown(d, -1); // run straight through him
         d.tackleCooldown = 1.3;
         fx.hitFlash(d.group.position.clone().setY(1.1), 1.3);
@@ -931,11 +935,14 @@ function resolveTackle() {
   let breaks = unstoppable || (carrier.turboT > 0 && !gang);
   if (!breaks && !gang && isUser && sprintHeld && carrier.stam.tier !== TIERS.GASSED) {
     breaks = true;
-    carrier.stam.value = Math.max(0, carrier.stam.value - TACKLE_BREAK_COST / carrier.powerMul);
+    carrier.stam.value = Math.max(
+      0,
+      carrier.stam.value - (TACKLE_BREAK_COST * defender.tackleMul) / carrier.powerMul
+    );
   }
   if (!breaks && !gang && !isUser && carrier.team !== USER_TEAM) {
     // A drag-down from behind is the easiest to run through.
-    breaks = Math.random() < (type === 'drag' ? 0.34 : 0.24) * carrier.powerMul;
+    breaks = Math.random() < ((type === 'drag' ? 0.34 : 0.24) * carrier.powerMul) / defender.tackleMul;
   }
 
   const contact = carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1.1);
@@ -1077,7 +1084,7 @@ function updateBlocker(p) {
     p.velocity.set(0, 0, 0);
     return;
   }
-  p.velocity.copy(scratch.normalize()).multiplyScalar(BLOCKER_SPEED);
+  p.velocity.copy(scratch.normalize()).multiplyScalar(BLOCKER_SPEED * (0.8 + 0.3 * p.blockMul));
 }
 
 function resolveBlocks() {
@@ -1087,11 +1094,13 @@ function resolveBlocks() {
       const dx = d.group.position.x - b.group.position.x;
       const dz = d.group.position.z - b.group.position.z;
       const dist = Math.hypot(dx, dz);
-      if (dist > 0.001 && dist < BLOCK_RADIUS) {
-        const push = (BLOCK_RADIUS - dist) / dist;
+      const radius = BLOCK_RADIUS * b.blockMul;
+      if (dist > 0.001 && dist < radius) {
+        const push = (radius - dist) / dist;
         d.group.position.x += dx * push;
         d.group.position.z += dz * push;
-        d.velocity.multiplyScalar(0.55);
+        // A good blocker stones his man; a poor one barely slows him.
+        d.velocity.multiplyScalar(THREE.MathUtils.clamp(0.9 - 0.45 * b.blockMul, 0.2, 0.85));
       }
     }
   }
@@ -1470,7 +1479,7 @@ function updateLivePlay(dt) {
     const wr = ball.intended;
     scratch.copy(wr.group.position);
     scratch.y = 1.1;
-    const reach = wr.diveT > 0 ? DIVE_CATCH_DIST : CATCH_DIST;
+    const reach = (wr.diveT > 0 ? DIVE_CATCH_DIST : CATCH_DIST) * wr.handsMul;
     // Hand control to the receiver late so the user can adjust to the ball.
     if (
       !play.snapping && wr.team === USER_TEAM && wr !== controlled &&
@@ -1480,6 +1489,17 @@ function updateLivePlay(dt) {
       touch.setMode('carry');
     }
     if (ball.airTime > 0.1 && ball.mesh.position.distanceTo(scratch) < reach) {
+      // Stone hands drop one now and again.
+      if (!play.snapping && Math.random() < wr.dropChance) {
+        ball.velocity.set(0, -3, 0);
+        wr.dropCooldown = 0.5;
+        ui.hud.toast(`DROPPED BY ${wr.character?.name ?? ''}`);
+        audio.hit(0.4);
+        play.thrown = true;
+        ball.intended = null;
+        endPlay('incomplete', drive.los);
+        return;
+      }
       holdBall(ball, wr);
       if (!play.snapping) {
         playPose(wr.pose, 'catch');
@@ -1577,22 +1597,16 @@ function updateTargets() {
 // ---- Boot -----------------------------------------------------------------
 
 function buildTeams() {
-  // Deal both sides out of the 21-character roster, no repeats.
-  const dealt = dealTeams(ROSTER_SIZE);
+  // The 14 rigs are built once. Who they are is decided by the draft, and
+  // applyBuild() re-shapes them per character rather than cloning again.
   for (const team of [TEAM.HOME, TEAM.AWAY]) {
-    const squad = team === TEAM.HOME ? dealt.home : dealt.away;
     for (let slot = 0; slot < ROSTER_SIZE; slot++) {
-      const character = squad[slot];
       const p = createPlayer(assets, {
         team,
         color: TEAM_COLORS[team],
         redJersey: team === TEAM.AWAY,
         iconLetter: team === USER_TEAM ? TARGET_LETTERS[slot] ?? null : null,
-        build: character.build,
       });
-      p.character = character;
-      p.speedMul = character.speed;
-      p.powerMul = character.power;
       p.slot = slot;
       p.actual = new THREE.Vector3(); // real velocity, carried across frames
       p.stam = new StaminaMeter({ regularBelow: 60, gassedBelow: 25 });
@@ -1607,7 +1621,66 @@ function buildTeams() {
   }
 }
 
-function newGame(surfaceKey, options) {
+let draft = null;
+let pendingStart = null;
+
+function applySquads(homeSquad, awaySquad) {
+  for (const p of players) {
+    const squad = p.team === TEAM.HOME ? homeSquad : awaySquad;
+    applyBuild(p, assets, squad[p.slot] ?? CHARACTERS[0]);
+  }
+}
+
+const draftHandlers = {
+  onPick(character) {
+    if (!draft || draft.done || draft.turn !== 'home' || !character) return;
+    draft.pick(character);
+    audio.uiTap();
+    ui.refreshDraft(draft, draftHandlers);
+    stepDraft();
+  },
+  onAuto() {
+    if (!draft) return;
+    audio.uiTap();
+    draft.autoFill();
+    ui.refreshDraft(draft, draftHandlers);
+    stepDraft();
+  },
+};
+
+// Let the CPU take its turn on a beat so a pick is readable, then hand the
+// board back. Recurses until it is your pick again or the board is full.
+function stepDraft() {
+  if (!draft) return;
+  if (draft.done) {
+    setTimeout(() => {
+      const { surfaceKey, options } = pendingStart;
+      newGame(surfaceKey, options, draft.home, draft.away);
+    }, 650);
+    return;
+  }
+  if (draft.turn !== 'away') return;
+  setTimeout(() => {
+    if (!draft || draft.done || draft.turn !== 'away') return;
+    draft.pick(draft.cpuChoice());
+    audio.catchBall();
+    ui.refreshDraft(draft, draftHandlers);
+    stepDraft();
+  }, 620);
+}
+
+function startDraft(surfaceKey, options) {
+  pendingStart = { surfaceKey, options };
+  draft = createDraft();
+  phase = 'draft';
+  touch.setMode('menu');
+  if (!world || world.surface.key !== surfaceKey) setSurface(surfaceKey);
+  ui.showDraft(draft, draftHandlers);
+  stepDraft();
+}
+
+function newGame(surfaceKey, options, homeSquad, awaySquad) {
+  applySquads(homeSquad, awaySquad);
   meta.options = options;
   meta.clock = GAME_SECONDS;
   meta.over = false;
@@ -1631,7 +1704,7 @@ function newGame(surfaceKey, options) {
 ui.handlers.onStart = (surfaceKey, options) => {
   audio.start();
   audio.uiTap();
-  newGame(surfaceKey, options);
+  startDraft(surfaceKey, options);
 };
 ui.handlers.onRestart = () => {
   ui.showTitle();
@@ -1641,6 +1714,7 @@ ui.handlers.onRestart = () => {
 ui.handlers.onSurfacePreview = (key) => {
   if (phase === 'menu' || phase === 'loading') setSurface(key);
 };
+// The draft camera just orbits the empty lot behind the board.
 ui.handlers.onToggle = (key, value) => {
   if (key === 'sound') audio.setMuted(!value);
   if (key === 'pickups') powerups.setEnabled?.(value);
@@ -1784,7 +1858,7 @@ function step(dt) {
       if (p.speedMul !== 1) desiredVel.multiplyScalar(p.speedMul);
       const dsq = desiredVel.lengthSq();
       const vsq = p.velocity.lengthSq();
-      let rate = dsq >= vsq ? ACCEL : DECEL;
+      let rate = (dsq >= vsq ? ACCEL : DECEL) * p.accelMul;
       if (dsq > 0.01 && vsq > 0.5) {
         // Cutting against your own momentum is slow; running straight is not.
         const dot =
@@ -1813,7 +1887,7 @@ function step(dt) {
       delta = Math.atan2(Math.sin(delta), Math.cos(delta));
       // A sprinting player turns in a wide arc; a walking one pivots.
       const frac = Math.min(1, speed / SPRINT_SPEED[TIERS.TURBO]);
-      const turn = TURN_RATE * (1 - TURN_AT_SPEED * frac) * dt;
+      const turn = TURN_RATE * (1 - TURN_AT_SPEED * frac) * p.agilityMul * dt;
       p.heading += THREE.MathUtils.clamp(delta, -turn, turn);
     }
     if (p.moveState?.type === 'spin') {
@@ -1936,7 +2010,7 @@ function step(dt) {
 
   const attack = viewAttack();
   const bp = ball.mesh.position;
-  const shot = phase === 'playcall' || phase === 'menu';
+  const shot = phase === 'playcall' || phase === 'menu' || phase === 'draft';
   if (shot) {
     // Slow orbit over the field behind the menus.
     const a = clock.elapsedTime * 0.12;

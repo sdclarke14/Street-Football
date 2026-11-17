@@ -1716,7 +1716,14 @@ function refreshTouchMode() {
   const eligible = controlled && (controlled.slot === SLOT.QB || play.off?.keepPass);
   const holding = ball.state === 'held' && ball.carrier === controlled;
   const snapIncoming = play.snapping && controlled?.slot === SLOT.QB;
-  const canThrow = !play.thrown && behindLOS && eligible && (holding || snapIncoming);
+  // On a designed run the quarterback is a runner, not a passer. Without
+  // this he met every throwing condition — QB, behind the line, holding it
+  // — so a QB DRAW came up with the receiver chips and hid spin, juke and
+  // truck until he had already crossed the line. The option keeps its
+  // chips, because choosing is the whole point of the play.
+  const designedRun = play.off?.type === 'run' && !play.off?.keepPass;
+  const canThrow =
+    !play.thrown && behindLOS && eligible && !designedRun && (holding || snapIncoming);
   touch.setMode(canThrow ? 'qb' : 'carry');
 }
 

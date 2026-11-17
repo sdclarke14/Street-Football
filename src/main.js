@@ -685,7 +685,6 @@ function snap() {
   }
   // Pass plays run on a clock; run plays don't.
   play.clockRunning = play.off.type !== 'run' && !play.off.qbFree;
-  touch.setMode(userOnOffense() ? 'qb' : 'defense');
 }
 
 function throwToReceiver(wr, lob = false) {
@@ -712,7 +711,6 @@ function throwToReceiver(wr, lob = false) {
   play.clockRunning = false;
   play.lastThrowAt = play.t;
   audio.throwBall();
-  touch.setMode(userOnOffense() ? 'carry' : 'defense');
 }
 
 // ---- Play endings ---------------------------------------------------------
@@ -1524,10 +1522,8 @@ function updateLivePlay(dt) {
         holdBall(ball, back);
         audio.catchBall();
         if (back.team === USER_TEAM) setControlled(back);
-        touch.setMode(userOnOffense() ? 'carry' : 'defense');
-      } else if (back === qb) {
-        touch.setMode(userOnOffense() ? 'carry' : 'defense');
-      }
+            } else if (back === qb) {
+            }
       play.handoffDone = true;
       play.handoffAt = play.t;
       play.snapping = false;
@@ -1611,7 +1607,6 @@ function updateLivePlay(dt) {
       ball.mesh.position.distanceTo(scratch) < 9
     ) {
       setControlled(wr);
-      touch.setMode('carry');
     }
     if (ball.airTime > 0.1 && ball.mesh.position.distanceTo(scratch) < reach) {
       // Stone hands drop one now and again.
@@ -1635,8 +1630,7 @@ function updateLivePlay(dt) {
       }
       play.snapping = false;
       if (wr.team === USER_TEAM && wr !== controlled) setControlled(wr);
-      touch.setMode(userOnOffense() ? 'carry' : 'defense');
-    } else if (ball.mesh.position.y < 0.2) {
+        } else if (ball.mesh.position.y < 0.2) {
       if (play.intReturn !== null) endReturn('tackle', ball.mesh.position.x);
       else endPlay('incomplete', drive.los);
       return;
@@ -1689,6 +1683,41 @@ function refreshHUD() {
     ? `${conversion.points}-POINT TRY`
     : `${['1ST', '2ND', '3RD', '4TH'][drive.down - 1]} & ${toGo} · ${ballOnText()}`;
   ui.hud.setDown(`${TEAM_NAMES[drive.offense]} BALL · ${label}`);
+}
+
+// The touch layout is derived from game state every frame. It used to be
+// set at a dozen scattered event points, and the snap — which is itself a
+// throw from the centre to the quarterback — ran the same catch path as a
+// completed pass and swapped the receiver chips for the ball-carrier
+// buttons. On a phone that made it impossible to ever throw.
+function refreshTouchMode() {
+  if (phase === 'lineup') {
+    touch.setMode(userOnOffense() ? 'lineup' : 'defense');
+    return;
+  }
+  if (phase !== 'live') {
+    touch.setMode('menu');
+    return;
+  }
+  const userHasBall = ball.carrier && ball.carrier === controlled && controlled.team === USER_TEAM;
+  if (play.intReturn !== null) {
+    touch.setMode(userHasBall ? 'carry' : 'defense');
+    return;
+  }
+  if (!userOnOffense()) {
+    touch.setMode('defense');
+    return;
+  }
+  // On offence: show the receiver chips whenever the man you are driving is
+  // actually allowed to throw — including while the snap is still in the
+  // air toward him, so the chips never blink out at the worst moment.
+  const behindLOS =
+    controlled && offAttack() * (controlled.group.position.x - drive.los) <= 0.5;
+  const eligible = controlled && (controlled.slot === SLOT.QB || play.off?.keepPass);
+  const holding = ball.state === 'held' && ball.carrier === controlled;
+  const snapIncoming = play.snapping && controlled?.slot === SLOT.QB;
+  const canThrow = !play.thrown && behindLOS && eligible && (holding || snapIncoming);
+  touch.setMode(canThrow ? 'qb' : 'carry');
 }
 
 function updateTargets() {
@@ -2088,6 +2117,7 @@ function step(dt) {
   }
 
   updateBall(ball, dt);
+  refreshTouchMode();
   updateTargets();
   refreshHUD();
 

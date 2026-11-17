@@ -118,10 +118,12 @@ export function createTouchControls(handlers) {
     const chips = [...targetsHost.querySelectorAll('.btn')];
     chips.forEach((chip, i) => {
       const n = chips.length;
-      const a = Math.PI * (0.52 - (i / Math.max(1, n - 1)) * 0.46);
-      const R = Math.min(168, h * 0.42);
-      chip.style.right = `${rightPad + 24 + Math.cos(a) * R - 29}px`;
-      chip.style.bottom = `${botPad + 26 + Math.sin(a) * R - 29}px`;
+      // The arc used to start at 0.52pi, whose cosine is negative — the top
+      // chip ended up a couple of pixels from the screen edge and clipped.
+      const a = Math.PI * (0.44 - (i / Math.max(1, n - 1)) * 0.40);
+      const R = Math.min(165, h * 0.42);
+      chip.style.right = `${Math.max(rightPad, rightPad + 24 + Math.cos(a) * R - 29)}px`;
+      chip.style.bottom = `${Math.max(botPad, botPad + 26 + Math.sin(a) * R - 29)}px`;
     });
 
     rotate.classList.toggle('on', h > w && 'ontouchstart' in window);

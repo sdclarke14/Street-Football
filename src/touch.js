@@ -65,6 +65,7 @@ export function createTouchControls(handlers) {
     ${BTN('tc-truck', 'TRUCK', 'C', 66, '#ff9a5c')}
     ${BTN('tc-switch', 'SWITCH', 'Q', 66, '#cfd6dc')}
     ${BTN('tc-pick', 'PICK', 'E', 72, '#ffd54a')}
+    ${BTN('tc-catch', 'CATCH', 'tap / hold', 96, '#ffd54a')}
     ${BTN('tc-gb', 'BREAK', 'V', 74, '#ffd54a')}
     ${BTN('tc-snap', 'SNAP', 'tap', 92, '#b9f227')}
     ${BTN('tc-menu', '☰', '', 44, 'rgba(20,24,20,0.72)')}
@@ -106,6 +107,7 @@ export function createTouchControls(handlers) {
     place('tc-switch', rightPad + 92, botPad + 18);
     place('tc-pick', rightPad, botPad);
     place('tc-gb', rightPad + 46, Math.min(botPad + 176, h - 150));
+    place('tc-catch', rightPad, botPad); // prime thumb spot for the 0.8s window
     el('tc-snap').style.left = `${w / 2 - 46}px`;
     el('tc-snap').style.bottom = `${botPad + 6}px`;
     el('tc-snap').style.right = 'auto';
@@ -227,6 +229,8 @@ export function createTouchControls(handlers) {
   bindButton('tc-snap', { onDown: () => handlers.onSnap?.() });
   bindButton('tc-menu', { onDown: () => handlers.onMenu?.() });
   bindButton('tc-gb', { onDown: () => handlers.onGamebreaker?.() });
+  // Tap for a secure catch, hold for the aggressive jump-ball attempt.
+  bindButton('tc-catch', { onUp: (heldMs) => handlers.onCatch?.(heldMs > 260) });
   // The gamebreaker button only exists while the meter is full.
   let gbReady = false;
   el('tc-gb').classList.add('hidden');
@@ -299,6 +303,17 @@ export function createTouchControls(handlers) {
   }
 
   function setMode(mode) {
+    const catching = mode === 'catching';
+    show('tc-catch', catching);
+    if (catching) {
+      // The window is short; everything else gets out of the way.
+      for (const id of ['tc-snap','tc-turbo','tc-spin','tc-juke','tc-truck','tc-switch','tc-pick']) {
+        show(id, false);
+      }
+      targetsHost.style.display = 'none';
+      root.classList.remove('off');
+      return;
+    }
     const carrier = mode === 'carry';
     const qb = mode === 'qb';
     const defense = mode === 'defense';
@@ -326,6 +341,12 @@ export function createTouchControls(handlers) {
     },
     setTargets,
     setMode,
+    // Colour the button by how good the tap timing would be right now.
+    setCatchQuality(q) {
+      const node = el('tc-catch');
+      const bg = q === 'green' ? '#8ff04a' : q === 'yellow' ? '#ffd54a' : '#ff8a5c';
+      if (node.__q !== q) { node.__q = q; node.style.background = bg; }
+    },
     setGamebreaker,
     layout,
     hide(on) {

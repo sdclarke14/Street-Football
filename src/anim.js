@@ -133,6 +133,39 @@ const TRUCK = {
   head: [0, 0.90, 0.44],
 };
 
+// Both hands high overhead, body extended — the jump-ball / aggressive
+// catch. Real games pick the catch animation from the ball's trajectory:
+// high ball means hands above the head, not a chest catch.
+const JUMP_CATCH = {
+  lArm: [0.30, 0.88, 0.37],
+  lFore: [0.18, 0.96, 0.22],
+  rArm: [-0.30, 0.88, 0.37],
+  rFore: [-0.18, 0.96, 0.22],
+  chest: [0, 0.98, 0.18],
+  head: [0, 0.92, 0.39],
+  lUpLeg: [0.10, -0.96, -0.26],
+  rUpLeg: [-0.10, -0.96, -0.26],
+};
+
+// Ball tucked to the chest: the safe, possession catch.
+const SECURE_CATCH = {
+  lArm: [0.34, -0.52, 0.78],
+  lFore: [0.10, -0.08, 0.99],
+  rArm: [-0.34, -0.52, 0.78],
+  rFore: [-0.10, -0.08, 0.99],
+  chest: [0, 0.94, 0.34],
+  head: [0, 0.93, 0.37],
+};
+
+// Defender swatting the ball away rather than trying to take it.
+const DEFLECT = {
+  rArm: [-0.26, 0.92, 0.29],
+  rFore: [-0.14, 0.97, 0.20],
+  lArm: [0.40, -0.40, 0.82],
+  chest: [0, 0.96, 0.28],
+  head: [0, 0.94, 0.34],
+};
+
 // Sprawled on the ground after a tackle. Declared in model space like the
 // rest, so it reads correctly however far the body is pitched over.
 const DOWN = {
@@ -170,6 +203,9 @@ export const POSES = {
   truck: { dur: 0.4, at: () => TRUCK },
   celebrate: { dur: 1.8, at: () => CELEBRATE },
   down: { dur: Infinity, loop: true, at: () => DOWN },
+  jumpCatch: { dur: 0.6, at: () => JUMP_CATCH },
+  secureCatch: { dur: 0.5, at: () => SECURE_CATCH },
+  deflect: { dur: 0.5, at: () => DEFLECT },
 };
 
 // ---- Solving -------------------------------------------------------------

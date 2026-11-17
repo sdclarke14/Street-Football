@@ -18,6 +18,7 @@ export function createBall(scene) {
     carrier: null,
     intended: null, // receiver a thrown ball is meant for
     airTime: 0,
+    tipped: false,
     velocity: new THREE.Vector3(),
   };
 }

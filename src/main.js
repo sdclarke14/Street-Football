@@ -107,6 +107,18 @@ const AI_SNAP_DELAY = 1.1;
 const QB_MIN_HOLD = 0.75;
 const QB_OPEN_DIST = 3.1;
 const DEAD_PAUSE = 1.7;
+// Catch system. Modelled on how the big football games do it: a timing
+// window on the ball's arrival, three catch types, and a contested catch
+// resolved between receiver and defender with three possible outcomes —
+// caught, broken up, or picked. The 0.24 contested-interception base is a
+// community figure for Madden, not an official number, so treat it as a
+// starting point for tuning rather than gospel.
+const CATCH_WINDOW = 0.8;     // seconds before arrival that the window opens
+const GREEN_LO = 0.08;        // tap inside this band for a clean catch
+const GREEN_HI = 0.40;
+const CONTEST_RADIUS = 2.6;   // a defender this close makes it contested
+const BASE_INT_CONTESTED = 0.24;
+const TIP_RADIUS = 1.3;       // anyone can grab a tipped ball inside this
 const INT_RADIUS = 1.9;
 const INT_CHANCE = 0.5;
 const INT_LOCKOUT = 0.35;
@@ -207,6 +219,7 @@ const touch = createTouchControls({
   onSwitch: () => switchControl(),
   onPick: () => userContest(),
   onGamebreaker: () => activateGamebreaker(),
+  onCatch: (aggressive) => userCatch(aggressive),
   onMenu: () => toggleSound(),
 });
 
@@ -223,6 +236,7 @@ const meta = {
   clock: GAME_SECONDS, options: { pickups: true, sound: true }, over: false,
   lastResult: null, // { reason, spot, gain } — the reason the last play ended
   lastTackle: null, // { type, gang, extra, spot } — how the last tackle went
+  catchLog: [],     // every catch resolution, for tuning
 };
 
 const play = {
@@ -340,10 +354,24 @@ function userMove(type) {
 function userContest() {
   if (phase !== 'live' || !controlled) return;
   if (controlled.team === drive.offense && ball.state === 'thrown') {
-    controlled.diveT = 0.5; // dive/stretch catch
+    userCatch(false);
     return;
   }
   attemptInterception();
+}
+
+// Tap inside the green band for a clean, secure catch; hold to go up and
+// high-point it, which wins more contested balls and drops more of them.
+function userCatch(aggressive) {
+  const cw = play.catch;
+  if (!cw || cw.tapAt !== null || cw.wr !== controlled) return;
+  cw.tapAt = cw.tta;
+  const covered = nearestOpponentDist(cw.wr) < 3;
+  cw.type = aggressive ? 'aggressive' : covered ? 'possession' : 'rac';
+  cw.wr.diveT = 0.35;
+  playPose(cw.wr.pose, aggressive ? 'jumpCatch' : 'secureCatch');
+  if (aggressive) hop(cw.wr, 0.55);
+  audio.uiTap();
 }
 
 function switchControl() {
@@ -547,6 +575,8 @@ function lineupPlay() {
   play.clockRunning = false;
   play.tackle = null;
   play.intReturn = null;
+  play.catch = null;
+  ball.tipped = false;
   play.startX = drive.los;
   play.routes.clear();
   play.coverage.clear();
@@ -571,6 +601,9 @@ function lineupPlay() {
     p.moveCooldown = 0;
     p.tackleCooldown = 0;
     p.blockedBy = null; // stale block assignments would carry between plays
+    p.playingBall = false;
+    p.hop = null;
+    p.group.position.y = 0;
     p.down = false;
     p.downT = 0;
     p.rig.position.y = p.restRigY; // get up off the floor
@@ -867,6 +900,12 @@ function onHazardHit(hazard, victim) {
 
 // Put a player on the ground. dir +1 falls forward, -1 goes over backwards.
 // He stays down until the next lineup resets him.
+// A short vertical hop. Nothing else writes group.position.y, so a jump
+// ball can simply own it for half a second.
+function hop(p, height = 0.5, dur = 0.55) {
+  p.hop = { t: 0, dur, height };
+}
+
 function knockDown(p, dir) {
   p.down = true;
   p.downT = 0;
@@ -911,6 +950,168 @@ function tryStartTackle(defender, carrier) {
   fx.hitFlash(carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1), 0.9);
   hitStop(0.04);
   audio.hit(type === 'wrap' ? 0.9 : 0.7);
+}
+
+// When the window opens, every defender near the arrival point decides
+// whether to go for the ball or stay on the man. Going for it wins picks
+// and loses leverage: a defender who gambles and misses is out of the play.
+function decideBallPlay() {
+  const spot = ballLandingSpot();
+  for (const d of teamPlayers(defenseTeam())) {
+    d.playingBall = false;
+    if (incapacitated(d) || d.down) continue;
+    const toSpot = d.group.position.distanceTo(spot);
+    const toWr = ball.intended ? d.group.position.distanceTo(ball.intended.group.position) : 99;
+    if (Math.min(toSpot, toWr) > 6.5) continue;
+    meta.ballPlayConsidered = (meta.ballPlayConsidered ?? 0) + 1;
+    const skill =
+      (d.character?.attr.tackling ?? 60) * 0.6 + (d.character?.attr.hands ?? 50) * 0.4;
+    // Roughly half of defenders in range commit. Below this the defence
+    // essentially never attacked the ball and picks did not happen.
+    d.playingBall = Math.random() < THREE.MathUtils.clamp((skill - 30) / 80, 0.15, 0.85);
+    if (d.playingBall) meta.ballPlayCommitted = (meta.ballPlayCommitted ?? 0) + 1;
+  }
+}
+
+// Caught, broken up, or picked. Resolved once, at the ball.
+function resolveCatch(wr) {
+  const cw = play.catch;
+  let db = null;
+  let gap = CONTEST_RADIUS;
+  for (const d of teamPlayers(defenseTeam())) {
+    if (incapacitated(d) || d.down) continue;
+    const dist = d.group.position.distanceTo(wr.group.position);
+    if (dist >= CONTEST_RADIUS) continue;
+    // A defender who went up for the ball is the one contesting it, even if
+    // someone else ended up a half step nearer the receiver.
+    const better = !db || (d.playingBall && !db.playingBall) ||
+      (d.playingBall === db.playingBall && dist < gap);
+    if (better) { db = d; gap = dist; }
+  }
+
+  const timing =
+    cw?.tapAt == null ? 'auto' : cw.tapAt >= GREEN_LO && cw.tapAt <= GREEN_HI ? 'green' : 'yellow';
+  const type = cw?.type ?? 'possession';
+
+  // How well the receiver attacks the ball.
+  let wrScore = (wr.character?.attr.hands ?? 70) * 0.012 + wr.handsMul * 0.5;
+  if (timing === 'green') wrScore += 0.38;
+  else if (timing === 'yellow') wrScore += 0.12;
+  if (type === 'aggressive') wrScore += 0.22;
+  else if (type === 'possession') wrScore += 0.12;
+
+  const finish = (caught, outcome) => {
+    meta.catchLog.push({
+      outcome, type, timing, contested: !!db,
+      gap: db ? +gap.toFixed(2) : null,
+      playingBall: db ? !!db.playingBall : null,
+      wr: wr.character?.name ?? null,
+      db: db?.character?.name ?? null,
+    });
+    play.catch = null;
+    for (const d of players) d.playingBall = false;
+    return caught;
+  };
+
+  if (!db) {
+    // Uncontested: only his hands can beat him.
+    let drop = wr.dropChance;
+    drop *= timing === 'green' ? 0.25 : timing === 'yellow' ? 0.7 : 1;
+    if (type === 'aggressive') drop *= 1.6;
+    if (Math.random() < drop) {
+      tipBall(0.6);
+      ui.hud.toast(`DROPPED BY ${wr.character?.name ?? ''}`);
+      audio.hit(0.4);
+      return finish(false, 'drop');
+    }
+    completeCatch(wr, type, timing);
+    return finish(true, 'catch');
+  }
+
+  // Contested. Closer defender and a defender playing the ball both matter.
+  let dbScore = (db.character?.attr.tackling ?? 60) * 0.009 + db.handsMul * 0.38;
+  dbScore *= db.playingBall ? 1.3 : 0.8;
+  dbScore *= THREE.MathUtils.clamp(1.45 - gap / CONTEST_RADIUS, 0.45, 1.45);
+
+  const total = wrScore + dbScore || 1;
+  let pInt = BASE_INT_CONTESTED * (dbScore / total) * (db.playingBall ? 2.2 : 0.5);
+  if (type === 'possession') pInt *= 0.75;      // securing it protects the ball
+  else if (type === 'aggressive') pInt *= 1.15; // going up for it risks more
+  pInt = THREE.MathUtils.clamp(pInt, 0, 0.6);
+  const pCatch = Math.min(1 - pInt, (wrScore / total) * (type === 'aggressive' ? 1.08 : 1));
+
+  const roll = Math.random();
+  playPose(db.pose, db.playingBall ? 'jumpCatch' : 'deflect');
+  hop(db, db.playingBall ? 0.45 : 0.3);
+
+  if (roll < pInt) {
+    interceptBall(db);
+    return finish(false, 'interception');
+  }
+  if (roll < pInt + pCatch) {
+    completeCatch(wr, type, timing, true);
+    return finish(true, 'contested catch');
+  }
+  // Broken up: the ball comes loose and is live until it lands.
+  tipBall(1.0);
+  fx.hitFlash(wr.group.position.clone().setY(1.6), 1.2);
+  audio.hit(0.7);
+  cheer(0.5);
+  ui.hud.toast('BROKEN UP');
+  if (db.team === USER_TEAM) addStyle(STYLE.stop);
+  return finish(false, 'broken up');
+}
+
+function completeCatch(wr, type, timing, contested = false) {
+  holdBall(ball, wr);
+  ball.tipped = false;
+  playPose(wr.pose, type === 'aggressive' ? 'jumpCatch' : 'secureCatch');
+  if (type === 'aggressive') hop(wr, 0.55);
+  // Run-after-catch keeps the momentum he had; the others cost a beat.
+  if (type !== 'rac') wr.actual.multiplyScalar(type === 'possession' ? 0.45 : 0.7);
+  audio.catchBall();
+  cheer(contested ? 0.9 : 0.5);
+  if (wr.team === USER_TEAM) addStyle(contested ? STYLE.bigGain : STYLE.completion);
+  const label = contested
+    ? 'CONTESTED CATCH!'
+    : type === 'aggressive' ? 'HIGH POINT!'
+      : type === 'rac' ? 'CAUGHT IN STRIDE' : 'CAUGHT';
+  ui.hud.toast(timing === 'green' ? `${label} (CLEAN)` : label);
+  if (wr.team === USER_TEAM && wr !== controlled) setControlled(wr);
+}
+
+// Knock the ball loose. It stays live until it hits the ground, so a tipped
+// pass can still be come down with — by either side.
+function tipBall(power) {
+  ball.state = 'thrown';
+  ball.carrier = null;
+  ball.intended = null;
+  ball.tipped = true;
+  ball.velocity.set(
+    (Math.random() - 0.5) * 4 * power,
+    2.4 * power + 1,
+    (Math.random() - 0.5) * 4 * power
+  );
+  ball.airTime = 0;
+}
+
+function interceptBall(db) {
+  holdBall(ball, db);
+  ball.tipped = false;
+  play.intReturn = db.team;
+  play.tackle = null;
+  play.clockRunning = false;
+  hitStop(0.08);
+  fx.shake(0.3);
+  fx.hitFlash(db.group.position.clone().setY(1.6), 1.5);
+  audio.hit(1.1);
+  cheer(1.3);
+  if (db.team === USER_TEAM) {
+    addStyle(STYLE.interception);
+    setControlled(db);
+  }
+  ui.hud.banner('INTERCEPTED!', db.character?.name ?? '');
+  bannerT = 1.4;
 }
 
 function resolveTackle() {
@@ -1081,6 +1282,15 @@ function ballLandingSpot() {
     ? Math.max(0, v.y / g) // never gets that high: use the apex
     : (v.y + Math.sqrt(disc)) / g;
   return landing.set(x + v.x * t, catchY, z + v.z * t);
+}
+
+// Seconds until the ball falls back to catching height.
+function ballArrivalTime() {
+  const g = 20;
+  const v = ball.velocity;
+  const disc = v.y * v.y - 2 * g * (1.1 - ball.mesh.position.y);
+  if (disc <= 0) return Math.max(0, v.y / g);
+  return Math.max(0, (v.y + Math.sqrt(disc)) / g);
 }
 
 function trackBall(p) {
@@ -1294,11 +1504,20 @@ function updateDefender(d) {
     pursueCarrier(d, carrier);
     return;
   }
-  if (ball.state === 'thrown' && ball.intended && play.t - play.lastThrowAt > 0.12) {
-    const dist = d.group.position.distanceTo(ball.intended.group.position);
-    if (dist < 12 || job.target === ball.intended) {
-      pursue(d, ball.intended.group.position);
+  if (ball.state === 'thrown' && play.t - play.lastThrowAt > 0.12) {
+    // A defender who committed to the ball attacks where it is coming down,
+    // not where the receiver happens to be. This is what gives the defence
+    // a genuine shot at an interception.
+    if (d.playingBall || ball.tipped) {
+      pursue(d, ballLandingSpot());
       return;
+    }
+    if (ball.intended) {
+      const dist = d.group.position.distanceTo(ball.intended.group.position);
+      if (dist < 12 || job.target === ball.intended) {
+        pursue(d, ball.intended.group.position);
+        return;
+      }
     }
   }
 
@@ -1598,42 +1817,72 @@ function updateLivePlay(dt) {
   // Ball in the air.
   if (ball.state === 'thrown') {
     const wr = ball.intended;
-    scratch.copy(wr.group.position);
-    scratch.y = 1.1;
-    const reach = (wr.diveT > 0 ? DIVE_CATCH_DIST : CATCH_DIST) * wr.handsMul;
-    // Hand control to the receiver late so the user can adjust to the ball.
-    if (
-      !play.snapping && wr.team === USER_TEAM && wr !== controlled &&
-      ball.mesh.position.distanceTo(scratch) < 9
-    ) {
-      setControlled(wr);
-    }
-    if (ball.airTime > 0.1 && ball.mesh.position.distanceTo(scratch) < reach) {
-      // Stone hands drop one now and again.
-      if (!play.snapping && Math.random() < wr.dropChance) {
-        ball.velocity.set(0, -3, 0);
-        wr.dropCooldown = 0.5;
-        ui.hud.toast(`DROPPED BY ${wr.character?.name ?? ''}`);
-        audio.hit(0.4);
-        play.thrown = true;
-        ball.intended = null;
-        endPlay('incomplete', drive.los);
+
+    // A tipped ball belongs to nobody: first man there comes down with it.
+    if (!wr || ball.tipped) {
+      if (ball.mesh.position.y < 0.2) {
+        if (play.intReturn !== null) endReturn('tackle', ball.mesh.position.x);
+        else endPlay('incomplete', drive.los);
         return;
       }
-      holdBall(ball, wr);
-      if (!play.snapping) {
-        playPose(wr.pose, 'catch');
-        audio.catchBall();
-        cheer(0.5);
-        if (wr.team === USER_TEAM) addStyle(STYLE.completion);
-        ui.hud.toast(wr.diveT > 0 ? 'DIVING GRAB!' : 'CAUGHT');
+      if (ball.tipped && ball.airTime > 0.15) {
+        for (const p of players) {
+          if (incapacitated(p) || p.down) continue;
+          scratch.copy(p.group.position);
+          scratch.y = 1.1;
+          if (ball.mesh.position.distanceTo(scratch) > TIP_RADIUS) continue;
+          if (p.team === drive.offense) {
+            completeCatch(p, 'possession', 'auto');
+            ui.hud.toast('TIPPED AND CAUGHT!');
+          } else {
+            interceptBall(p);
+          }
+          ball.tipped = false;
+          break;
+        }
       }
-      play.snapping = false;
-      if (wr.team === USER_TEAM && wr !== controlled) setControlled(wr);
-        } else if (ball.mesh.position.y < 0.2) {
-      if (play.intReturn !== null) endReturn('tackle', ball.mesh.position.x);
-      else endPlay('incomplete', drive.los);
-      return;
+    } else {
+      scratch.copy(wr.group.position);
+      scratch.y = 1.1;
+      const reach = (wr.diveT > 0 ? DIVE_CATCH_DIST : CATCH_DIST) * wr.handsMul;
+
+      // Hand control to the receiver late so the user can adjust to the ball.
+      if (
+        !play.snapping && wr.team === USER_TEAM && wr !== controlled &&
+        ball.mesh.position.distanceTo(scratch) < 9
+      ) {
+        setControlled(wr);
+      }
+
+      // Open the catch window on the ball's arrival, once. Both sides get
+      // their chance here: the receiver to time his catch, the defence to
+      // decide whether to go up for the ball.
+      if (!play.snapping) {
+        const tta = ballArrivalTime();
+        if (!play.catch && tta < CATCH_WINDOW) {
+          play.catch = { wr, tapAt: null, type: null, tta };
+          decideBallPlay();
+        }
+        if (play.catch) play.catch.tta = tta;
+      }
+
+      if (ball.airTime > 0.1 && ball.mesh.position.distanceTo(scratch) < reach) {
+        if (play.snapping) {
+          holdBall(ball, wr);
+          play.snapping = false;
+        } else {
+          const caught = resolveCatch(wr);
+          if (!caught && !ball.tipped) {
+            endPlay('incomplete', drive.los);
+            return;
+          }
+        }
+      } else if (ball.mesh.position.y < 0.2) {
+        play.catch = null;
+        if (play.intReturn !== null) endReturn('tackle', ball.mesh.position.x);
+        else endPlay('incomplete', drive.los);
+        return;
+      }
     }
   }
 
@@ -1721,6 +1970,13 @@ function refreshTouchMode() {
   // — so a QB DRAW came up with the receiver chips and hid spin, juke and
   // truck until he had already crossed the line. The option keeps its
   // chips, because choosing is the whole point of the play.
+  // An open catch window takes priority over everything else.
+  if (play.catch && play.catch.wr === controlled && play.catch.tapAt === null) {
+    touch.setMode('catching');
+    const t = play.catch.tta;
+    touch.setCatchQuality?.(t >= GREEN_LO && t <= GREEN_HI ? 'green' : t > GREEN_HI ? 'yellow' : 'red');
+    return;
+  }
   const designedRun = play.off?.type === 'run' && !play.off?.keepPass;
   const canThrow =
     !play.thrown && behindLOS && eligible && !designedRun && (holding || snapIncoming);
@@ -2035,6 +2291,14 @@ function step(dt) {
     if (phase !== 'live') {
       p.velocity.set(0, 0, 0);
       p.actual.set(0, 0, 0);
+    }
+
+    // Vertical hop for a jump ball. Nothing else writes group.position.y.
+    if (p.hop) {
+      p.hop.t += dt;
+      const k = p.hop.t / p.hop.dur;
+      if (k >= 1) { p.hop = null; p.group.position.y = 0; }
+      else p.group.position.y = Math.sin(Math.PI * k) * p.hop.height;
     }
     p.group.position.addScaledVector(p.velocity, dt);
     p.group.position.x = THREE.MathUtils.clamp(p.group.position.x, -BOUND_X, BOUND_X);

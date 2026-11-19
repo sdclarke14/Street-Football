@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { CATCH_BONES } from './catchClip.js';
 import { TIERS } from './stamina.js';
 import { toonifyTree, addOutlines, RAMPS, setOutlineWidth, setKit, setOutlineColor } from './toon.js';
 import { captureRig, createPoseState } from './anim.js';
@@ -218,6 +219,13 @@ export function createPlayer(assets, { team, color, iconLetter = null, build = n
     down: false,
     downT: 0,
     fallDir: 1,
+    // Keyframed catch clip (Blender, authored on this rig). catchT < 0 means
+    // not playing; main.js advances it and writes the sampled pose onto these
+    // bones after the mixer runs.
+    catchT: -1,
+    clipBones: Object.fromEntries(
+      CATCH_BONES.map((n) => [n, rig.getObjectByName(n)]).filter(([, b]) => b)
+    ),
     // bones for ball socketing and procedural catch-reach
     hand: rig.getObjectByName('RightHand'),
     arms: {

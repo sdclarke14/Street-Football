@@ -14,6 +14,12 @@ import { createTouchControls, lockViewport } from './touch.js';
 import { createAudio } from './audio.js';
 import { toonify, addOutlines, RAMPS } from './toon.js';
 import { applyPose, stepPose, playPose } from './anim.js';
+import {
+  CATCH_CLIP,
+  CATCH_BONES,
+  makeCatchSampler,
+  catchWeight,
+} from './catchClip.js';
 import { CHARACTERS } from './roster.js';
 import { createDraft } from './draft.js';
 import {
@@ -362,6 +368,17 @@ function userContest() {
 
 // Tap inside the green band for a clean, secure catch; hold to go up and
 // high-point it, which wins more contested balls and drops more of them.
+// The grounded reach-and-tuck is a real keyframed clip now. The jumping and
+// contested catches are still procedural poses - they need to key off the
+// ball's height, which a fixed clip cannot do.
+const sampleCatch = makeCatchSampler(THREE);
+
+function startCatchClip(p) {
+  p.catchT = 0;
+  p.pose.name = null; // the clip owns the upper body while it runs
+  p.pose.weight = 0;
+}
+
 function userCatch(aggressive) {
   const cw = play.catch;
   if (!cw || cw.tapAt !== null || cw.wr !== controlled) return;
@@ -369,7 +386,8 @@ function userCatch(aggressive) {
   const covered = nearestOpponentDist(cw.wr) < 3;
   cw.type = aggressive ? 'aggressive' : covered ? 'possession' : 'rac';
   cw.wr.diveT = 0.35;
-  playPose(cw.wr.pose, aggressive ? 'jumpCatch' : 'secureCatch');
+  if (aggressive) playPose(cw.wr.pose, 'jumpCatch');
+  else startCatchClip(cw.wr);
   if (aggressive) hop(cw.wr, 0.55);
   audio.uiTap();
 }
@@ -1065,7 +1083,8 @@ function resolveCatch(wr) {
 function completeCatch(wr, type, timing, contested = false) {
   holdBall(ball, wr);
   ball.tipped = false;
-  playPose(wr.pose, type === 'aggressive' ? 'jumpCatch' : 'secureCatch');
+  if (type === 'aggressive') playPose(wr.pose, 'jumpCatch');
+  else startCatchClip(wr);
   if (type === 'aggressive') hop(wr, 0.55);
   // Run-after-catch keeps the momentum he had; the others cost a beat.
   if (type !== 'rac') wr.actual.multiplyScalar(type === 'possession' ? 0.45 : 0.7);
@@ -2149,6 +2168,7 @@ loadPlayerAssets().then((loaded) => {
   window.__game = {
     THREE, // debug handle: lets a harness build vectors in page context
     anim: { applyPose, stepPose, playPose }, // pose preview harness
+    catch: { CATCH_CLIP, CATCH_BONES, sampleCatch, catchWeight }, // clip harness
     players, ball, drive, score, meta, play, style, powerups, renderer, scene, camera,
     snap, newGame, step,
     get phase() { return phase; },
@@ -2345,9 +2365,28 @@ function step(dt) {
     updatePlayerClip(p, clipTier, p.stunT > 0 ? 0 : speed);
     p.mixer.update(dt);
 
+    if (p.catchT >= 0) {
+      // Keyframed catch clip. Written straight onto the bones after the mixer
+      // for the same reason the procedural poses are - see catchClip.js. Only
+      // upper-body bones are in the clip, so the run cycle keeps the legs.
+      p.catchT += dt;
+      if (p.catchT > CATCH_CLIP.duration) {
+        p.catchT = -1;
+      } else {
+        const w = catchWeight(p.catchT);
+        const s = sampleCatch(p.catchT);
+        for (const name of CATCH_BONES) {
+          const bone = p.clipBones[name];
+          if (bone) bone.quaternion.slerp(s.rot[name], w);
+        }
+        const hips = p.clipBones.Hips;
+        if (hips) hips.position.lerp(s.hipsPos, w);
+      }
+    }
+
     // Pose overlay. A paused run clip still writes its frozen stride, so a
     // standing player used to be a runner mid-step; idle/brace solve over it.
-    const poseOut = stepPose(p.pose, dt, {
+    const poseOut = p.catchT >= 0 ? null : stepPose(p.pose, dt, {
       wantIdle: p.down || (speed < 0.45 && p.stunT <= 0),
       idleName: p.down ? 'down' : phase === 'lineup' ? 'brace' : 'idle',
       clock: clock.elapsedTime + p.poseOffset,

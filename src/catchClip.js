@@ -1,6 +1,7 @@
 // Catch_Reach_Tuck - a keyframed clip, not a procedural pose overlay.
 //
-// Authored in Blender on this game's own rig (public/models/hero_regular_run.glb),
+// Authored in Blender on this game's own rig (assets-src/models/hero_regular_run.glb,
+// now packed into public/models/hero.glb),
 // so the bone names below are the rig's and the clip binds with no retargeting.
 // 30 fps, 37 samples baked from 7 poses:
 //   START(1) RISE(7) CONTACT(12) ABSORB(17) TUCK(24) SETTLE(30) CARRY(37)

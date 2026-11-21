@@ -182,6 +182,22 @@ const CSS = `
 #ui-result { background: rgba(10,14,12,0.95); align-items: center; justify-content: center; text-align: center; }
 #ui-result .fs { font-size: clamp(34px, 9vw, 86px); font-weight: 900; letter-spacing: -2px; }
 #ui-result .ln { font-size: clamp(12px,2vw,16px); opacity: 0.75; margin-top: 10px; letter-spacing: 1px; }
+#ui-result .notes { margin-top: 12px; font-size: clamp(11px,1.8vw,14px); font-weight: 900; letter-spacing: 1.5px; color: #ffd54a; line-height: 1.6; }
+#ui-result .rec { margin-top: 10px; font-size: clamp(10px,1.6vw,12px); opacity: 0.6; letter-spacing: 1.5px; }
+#ui .rec { font-size: clamp(10px,1.5vw,12px); font-weight: 800; letter-spacing: 1.5px; color: #ffd54a; margin-top: 8px; }
+#ui .toggle.diff { background: rgba(0,0,0,0.45); border-color: #ffd54a; color: #ffd54a; min-width: 78px; text-align: center; }
+/* ---- Pause ---- */
+body.sf-paused .conv-btn { display: none !important; }
+#ui-pause { background: rgba(10,14,12,0.80); align-items: center; justify-content: center; text-align: center; z-index: 5; }
+#ui-pause .fs { font-size: clamp(30px, 7vw, 64px); font-weight: 900; letter-spacing: -1px; }
+#ui-pause .sit { font-size: clamp(11px,1.8vw,14px); opacity: 0.7; letter-spacing: 1.5px; margin-top: 6px; }
+#ui-pause .col { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; align-items: center; }
+#ui-pause .cta { margin: 0; min-width: 200px; }
+#ui-pause .ghost { pointer-events: auto; cursor: pointer; padding: 11px 26px; min-width: 200px; border-radius: 999px;
+  background: rgba(0,0,0,0.35); color: #fff; font-weight: 900; letter-spacing: 1.5px; border: 2px solid rgba(255,255,255,0.3);
+  font-size: clamp(12px, 1.9vw, 15px); }
+#ui-pause .ghost.quit { border-color: rgba(255,107,107,0.6); color: #ff9b9b; }
+#ui-pause .keyhelp { margin-top: 16px; font-size: 11px; opacity: 0.55; letter-spacing: 0.5px; max-width: 640px; line-height: 1.6; padding: 0 16px; }
 @media (max-width: 1000px), (pointer: coarse) { #ui .keys { display: none; } }
 `;
 
@@ -206,9 +222,11 @@ export function createUI({ surfaces, art }) {
         <div class="row">
           <div class="toggle on" id="tg-pickups">STREET RULES</div>
           <div class="toggle on" id="tg-sound">SOUND</div>
+          <div class="toggle diff" id="tg-diff">NORMAL</div>
           <button class="cta" id="ui-start">PLAY BALL</button>
         </div>
-        <div class="hint">Phone: thumbstick + buttons. Keyboard: arrows move · Shift turbo · Space snap · A/S/D/F/G throw · Z spin · X juke · C truck.</div>
+        <div class="rec" id="ui-record"></div>
+        <div class="hint">Phone: thumbstick + buttons. Keyboard: arrows move · Shift turbo · Space snap · A/S/D/F/G throw (Shift + letter lobs) · Z spin · X juke · C truck · E catch (hold to high-point) / pick · Q switch · V gamebreaker · Esc pause · M mute.</div>
       </div>
     </div>
 
@@ -261,7 +279,20 @@ export function createUI({ surfaces, art }) {
     <div class="screen" id="ui-result">
       <div class="fs" id="res-score"></div>
       <div class="ln" id="res-line"></div>
+      <div class="notes" id="res-notes"></div>
+      <div class="rec" id="res-rec"></div>
       <div class="row" style="justify-content:center"><button class="cta" id="res-again" style="margin:18px auto 0">RUN IT BACK</button></div>
+    </div>
+
+    <div class="screen" id="ui-pause">
+      <div class="fs">PAUSED</div>
+      <div class="sit" id="pause-sit"></div>
+      <div class="col">
+        <button class="cta" id="pause-resume">RESUME</button>
+        <button class="ghost" id="pause-sound">SOUND: ON</button>
+        <button class="ghost quit" id="pause-quit">QUIT GAME</button>
+      </div>
+      <div class="keyhelp">Keyboard: arrows move · Shift turbo · Space snap · A S D F G throw (Shift + letter lobs) · Z spin · X juke · C truck · E catch, hold to high-point / pick · Q switch · V gamebreaker · 1 / 2 extra point · Esc or P pause · M mute</div>
     </div>
   `;
   document.body.appendChild(root);
@@ -269,7 +300,8 @@ export function createUI({ surfaces, art }) {
 
   // ---- Title ----
   let selectedSurface = 'concrete';
-  const opts = { pickups: true, sound: true };
+  const opts = { pickups: true, sound: true, difficulty: 'normal' };
+  const DIFFS = ['easy', 'normal', 'hard'];
   $('ui-title').querySelector('.bg').style.backgroundImage = `url(${art.title})`;
 
   const fieldsHost = $('ui-fields');
@@ -301,10 +333,33 @@ export function createUI({ surfaces, art }) {
   };
   bindToggle('tg-pickups', 'pickups');
   bindToggle('tg-sound', 'sound');
+  // Difficulty cycles EASY -> NORMAL -> HARD.
+  $('tg-diff').addEventListener('click', () => {
+    opts.difficulty = DIFFS[(DIFFS.indexOf(opts.difficulty) + 1) % DIFFS.length];
+    $('tg-diff').textContent = opts.difficulty.toUpperCase();
+    handlers.onToggle?.('difficulty', opts.difficulty);
+  });
+
+  // Restore saved menu choices (from record.js).
+  function setPrefs(p = {}) {
+    if (p.surface && surfaces.some((s) => s.key === p.surface)) {
+      selectedSurface = p.surface;
+      for (const c of fieldsHost.children) c.classList.toggle('sel', c.dataset.k === p.surface);
+    }
+    if (typeof p.pickups === 'boolean') opts.pickups = p.pickups;
+    if (typeof p.sound === 'boolean') opts.sound = p.sound;
+    if (DIFFS.includes(p.difficulty)) opts.difficulty = p.difficulty;
+    $('tg-pickups').classList.toggle('on', opts.pickups);
+    $('tg-sound').classList.toggle('on', opts.sound);
+    $('tg-diff').textContent = opts.difficulty.toUpperCase();
+  }
 
   const handlers = {};
   $('ui-start').addEventListener('click', () => handlers.onStart?.(selectedSurface, { ...opts }));
   $('res-again').addEventListener('click', () => handlers.onRestart?.());
+  $('pause-resume').addEventListener('click', () => handlers.onResume?.());
+  $('pause-sound').addEventListener('click', () => handlers.onPauseSound?.());
+  $('pause-quit').addEventListener('click', () => handlers.onQuit?.());
 
   // ---- Play call ----
   let activeTab = 'pass';
@@ -516,10 +571,30 @@ export function createUI({ surfaces, art }) {
       renderPlayCall(cfg);
       show('ui-playcall');
     },
-    showResult(scoreText, line) {
+    showResult(scoreText, line, notes = [], recordText = '') {
       $('res-score').textContent = scoreText;
       $('res-line').textContent = line;
+      $('res-notes').innerHTML = notes.map((n) => `<div>${n}</div>`).join('');
+      $('res-rec').textContent = recordText;
       show('ui-result');
+    },
+    setPrefs,
+    setRecord(text) {
+      $('ui-record').textContent = text;
+    },
+    showPause({ situation = '', soundOn = true } = {}) {
+      $('pause-sit').textContent = situation;
+      $('pause-sound').textContent = `SOUND: ${soundOn ? 'ON' : 'OFF'}`;
+      $('ui-pause').classList.add('on');
+    },
+    hidePause() {
+      $('ui-pause').classList.remove('on');
+    },
+    get paused() {
+      return $('ui-pause').classList.contains('on');
+    },
+    get surface() {
+      return selectedSurface;
     },
     get options() {
       return opts;

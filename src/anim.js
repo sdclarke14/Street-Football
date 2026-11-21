@@ -181,6 +181,22 @@ const DOWN = {
   head: [0, 0.86, 0.51],
 };
 
+// Flat on his back after a head-on wrap (the rig is tipped backwards, so
+// "forward" points at the sky). Matches the end of the Blender fallBack clip.
+const DOWN_BACK = {
+  lArm: [0.85, -0.45, -0.05],
+  lFore: [0.75, -0.25, 0.30],
+  rArm: [-0.85, -0.45, -0.05],
+  rFore: [-0.75, -0.25, 0.30],
+  lUpLeg: [0.18, -0.95, 0.25],
+  lLeg: [0.12, -0.97, -0.20],
+  rUpLeg: [-0.14, -0.97, 0.18],
+  rLeg: [-0.10, -0.98, -0.12],
+  chest: [0, 0.98, 0.18],
+  spineMid: [0, 0.99, 0.10],
+  head: [0, 0.93, 0.36],
+};
+
 const CELEBRATE = {
   lArm: [0.55, 0.82, 0.15],
   lFore: [0.45, 0.89, 0.10],
@@ -203,6 +219,7 @@ export const POSES = {
   truck: { dur: 0.4, at: () => TRUCK },
   celebrate: { dur: 1.8, at: () => CELEBRATE },
   down: { dur: Infinity, loop: true, at: () => DOWN },
+  downBack: { dur: Infinity, loop: true, at: () => DOWN_BACK },
   jumpCatch: { dur: 0.6, at: () => JUMP_CATCH },
   secureCatch: { dur: 0.5, at: () => SECURE_CATCH },
   deflect: { dur: 0.5, at: () => DEFLECT },

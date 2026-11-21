@@ -1,14 +1,15 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
-import { CATCH_BONES } from './catchClip.js';
+import { CLIP_BONES } from './clipPlayer.js';
 import { TIERS } from './stamina.js';
 import { toonifyTree, addOutlines, RAMPS, setOutlineWidth, setKit, setOutlineColor } from './toon.js';
 import { captureRig, createPoseState } from './anim.js';
 import { toMultipliers } from './roster.js';
 
-// All three GLBs share an identical 24-joint skeleton (verified), so the
-// turbo/regular clips bind by bone name onto clones of the base rig.
+// The three run clips came from three GLBs that share an identical 24-joint
+// skeleton (verified); tools/pack_hero.py retargets them by bone name into
+// public/models/hero.glb, so they bind onto clones of the base rig.
 const PLAYER_HEIGHT = 1.8;
 
 // The body texture is one baked atlas (not separable materials), but the
@@ -75,11 +76,14 @@ function processAtlas(map, { toRed = false } = {}) {
 
 export async function loadPlayerAssets() {
   const loader = new GLTFLoader();
-  const [base, turbo, regular] = await Promise.all([
-    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_gassed_run.glb'),
-    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_turbo_run.glb'),
-    loader.loadAsync(import.meta.env.BASE_URL + 'models/hero_regular_run.glb'),
-  ]);
+  // One file: the base rig, mesh and texture plus all three run clips,
+  // packed by tools/pack_hero.py (was three 7 MB GLBs of the same rig).
+  const base = await loader.loadAsync(import.meta.env.BASE_URL + 'models/hero.glb');
+  const clip = (name) => {
+    const c = base.animations.find((a) => a.name === name);
+    if (!c) throw new Error(`hero.glb is missing the ${name} clip`);
+    return c;
+  };
 
   const bbox = new THREE.Box3().setFromObject(base.scene);
   const size = bbox.getSize(new THREE.Vector3());
@@ -98,9 +102,9 @@ export async function loadPlayerAssets() {
     // the second full-size canvas pass for a red variant is gone.
     homeMap: processAtlas(baseMap),
     clips: {
-      [TIERS.GASSED]: base.animations[0], // Lean_Forward_Sprint, played slow
-      [TIERS.TURBO]: turbo.animations[0],
-      [TIERS.REGULAR]: regular.animations[0],
+      [TIERS.GASSED]: clip('Run_Gassed'), // Lean_Forward_Sprint, played slow
+      [TIERS.TURBO]: clip('Run_Turbo'),
+      [TIERS.REGULAR]: clip('Run_Regular'),
     },
   };
 }
@@ -223,8 +227,11 @@ export function createPlayer(assets, { team, color, iconLetter = null, build = n
     // not playing; main.js advances it and writes the sampled pose onto these
     // bones after the mixer runs.
     catchT: -1,
+    // The other Blender clips (throw, spin, juke, truck, falls) - see
+    // clipPlayer.js. clip is null or { name, t }.
+    clip: null,
     clipBones: Object.fromEntries(
-      CATCH_BONES.map((n) => [n, rig.getObjectByName(n)]).filter(([, b]) => b)
+      CLIP_BONES.map((n) => [n, rig.getObjectByName(n)]).filter(([, b]) => b)
     ),
     // bones for ball socketing and procedural catch-reach
     hand: rig.getObjectByName('RightHand'),

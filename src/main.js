@@ -14,6 +14,8 @@ import { createTouchControls, lockViewport } from './touch.js';
 import { createAudio } from './audio.js';
 import { toonify, addOutlines, RAMPS } from './toon.js';
 import { applyPose, stepPose, playPose } from './anim.js';
+import { CLIPS, startClip, makeClipPlayer } from './clipPlayer.js';
+import { loadRecord, savePrefs, recordGame, recordLine } from './record.js';
 import {
   CATCH_CLIP,
   CATCH_BONES,
@@ -226,7 +228,7 @@ const touch = createTouchControls({
   onPick: () => userContest(),
   onGamebreaker: () => activateGamebreaker(),
   onCatch: (aggressive) => userCatch(aggressive),
-  onMenu: () => toggleSound(),
+  onMenu: () => togglePause(),
 });
 
 // ---- State ----------------------------------------------------------------
@@ -243,6 +245,8 @@ const meta = {
   lastResult: null, // { reason, spot, gain } — the reason the last play ended
   lastTackle: null, // { type, gang, extra, spot } — how the last tackle went
   catchLog: [],     // every catch resolution, for tuning
+  difficulty: 'normal',
+  homeTDs: 0,       // your touchdowns this game, for the saved record
 };
 
 const play = {
@@ -254,9 +258,24 @@ const play = {
   qbFree: false, passClock: PASS_CLOCK, clockRunning: false,
   carrierSlot: null, startX: 0,
   tackle: null, intReturn: null, lastThrowAt: 0,
+  windup: null, // { qb, wr, lob, t } while the throw clip winds up to release
 };
 
 const style = { value: 0, active: 0 };
+
+// Difficulty, picked on the title screen. Everything scales the CPU side
+// except userBreak, which is what it costs you to run through a tackle.
+//   cpuSpeed  - how fast CPU players run (not their moves)
+//   cpuBreak  - how often a CPU ball carrier breaks a tackle
+//   cpuError  - how wild the CPU quarterback's throws are
+//   userBreak - stamina cost of breaking a tackle yourself
+const DIFFICULTY = {
+  easy: { cpuSpeed: 0.92, cpuBreak: 0.55, cpuError: 1.6, userBreak: 0.7 },
+  normal: { cpuSpeed: 1, cpuBreak: 1, cpuError: 1, userBreak: 1 },
+  hard: { cpuSpeed: 1.06, cpuBreak: 1.45, cpuError: 0.65, userBreak: 1.3 },
+};
+const diff = () => DIFFICULTY[meta.difficulty] ?? DIFFICULTY.normal;
+let paused = false;
 let deadTimer = 0;
 let lineupTimer = 0;
 let hitStopT = 0;
@@ -305,29 +324,81 @@ function toGoYards() {
 // ---- Input ----------------------------------------------------------------
 
 const keys = new Set();
+let eDownAt = null; // keyboard E held for a catch: decided on release, like the touch CATCH button
 window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (!audio.started) audio.start();
   if (k === ' ') e.preventDefault();
   if (keys.has(k)) return;
   keys.add(k);
+  if (k === 'escape' || k === 'p') { togglePause(); return; }
+  if (k === 'm') toggleSound();
+  if (paused) return;
   if (k === ' ') userSnap();
   const ti = TARGET_KEYS.indexOf(k);
   if (ti >= 0) userThrow(TARGET_SLOTS[ti], keys.has('shift'));
   if (k === 'z') userMove('spin');
   if (k === 'x') userMove('juke');
   if (k === 'c') userMove('truck');
-  if (k === 'e') userContest();
+  if (k === 'e') {
+    // In your catch window, E works like the CATCH button: tap for a secure
+    // catch, hold past 260 ms to go up and high-point it.
+    if (catchWindowIsMine()) eDownAt = performance.now();
+    else userContest();
+  }
   if (k === 'q') switchControl();
   if (k === 'v') activateGamebreaker();
-  if (k === 'm') toggleSound();
 });
-window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
-window.addEventListener('blur', () => keys.clear());
+window.addEventListener('keyup', (e) => {
+  const k = e.key.toLowerCase();
+  keys.delete(k);
+  if (k === 'e' && eDownAt !== null) {
+    const held = performance.now() - eDownAt;
+    eDownAt = null;
+    if (!paused) userCatch(held > 260);
+  }
+});
+window.addEventListener('blur', () => { keys.clear(); eDownAt = null; });
+// Leaving the tab or locking the phone mid-game pauses it.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && inGame() && !paused) togglePause();
+});
+
+function catchWindowIsMine() {
+  const cw = play.catch;
+  return phase === 'live' && !!cw && cw.tapAt === null && cw.wr === controlled;
+}
+
+function inGame() {
+  return ['lineup', 'live', 'dead', 'playcall', 'convert'].includes(phase);
+}
+
+// Pause: Esc / P on a keyboard, the ☰ button on a phone.
+function togglePause() {
+  if (!paused && !inGame()) return;
+  paused = !paused;
+  document.body.classList.toggle('sf-paused', paused);
+  if (paused) {
+    keys.clear();
+    eDownAt = null;
+    ui.showPause({
+      situation: `${TEAM_NAMES[TEAM.HOME]} ${score[TEAM.HOME]} — ${score[TEAM.AWAY]} ${TEAM_NAMES[TEAM.AWAY]} · ${clockText(meta.clock)} LEFT · ${(meta.difficulty || 'normal').toUpperCase()}`,
+      soundOn: !audio.muted,
+    });
+    touch.setMode('menu');
+  } else {
+    ui.hidePause();
+    clock.getDelta(); // don't bank the paused time as one giant frame
+    if (phase !== 'playcall' && phase !== 'convert') refreshTouchMode();
+  }
+}
 
 function toggleSound() {
   audio.setMuted(!audio.muted);
   ui.hud.toast(audio.muted ? 'SOUND OFF' : 'SOUND ON');
+  if (paused) {
+    ui.showPause({ situation: document.getElementById('pause-sit')?.textContent ?? '', soundOn: !audio.muted });
+  }
 }
 
 function userSnap() {
@@ -372,9 +443,11 @@ function userContest() {
 // contested catches are still procedural poses - they need to key off the
 // ball's height, which a fixed clip cannot do.
 const sampleCatch = makeCatchSampler(THREE);
+const stepClip = makeClipPlayer(THREE);
 
 function startCatchClip(p) {
   p.catchT = 0;
+  p.clip = null; // the catch takes over from any other clip
   p.pose.name = null; // the clip owns the upper body while it runs
   p.pose.weight = 0;
 }
@@ -428,6 +501,13 @@ function activateGamebreaker() {
 
 // ---- Moves ---------------------------------------------------------------
 
+// Which way the juke cuts, in the player's own frame. The cut moves him
+// along world z by dir; his left is +X of the model rotated by heading.
+function jukeClip(p, dir) {
+  const leftZ = -Math.sin(p.heading);
+  return dir * leftZ > 0 ? 'jukeLeft' : 'jukeRight';
+}
+
 function startMove(p, type) {
   if (p.moveCooldown > 0 || p.moveState || incapacitated(p)) return;
   if (type === 'truck' && p.stam.value < 20) return;
@@ -450,7 +530,8 @@ function startMove(p, type) {
   const dur = type === 'spin' ? SPIN_DURATION : type === 'truck' ? TRUCK_DURATION : JUKE_DURATION;
   p.moveState = { type, t: 0, dur, dir };
   p.moveCooldown = MOVE_COOLDOWN;
-  if (type === 'truck') playPose(p.pose, 'truck');
+  startClip(p, type === 'juke' ? jukeClip(p, dir) : type);
+  p.pose.name = null;
   if (type === 'truck') p.stam.value = Math.max(0, p.stam.value - 18);
 
   let sold = false;
@@ -584,6 +665,7 @@ function lineupPlay() {
   play.def = pendingCall.def;
   play.t = 0;
   play.thrown = false;
+  play.windup = null;
   play.snapping = false;
   play.handoffDone = false;
   play.handoffAt = 0;
@@ -616,6 +698,8 @@ function lineupPlay() {
     p.rig.rotation.set(0, 0, 0);
     p.stunT = p.slipT = p.stumbleT = p.commitT = p.burstT = p.diveT = 0;
     p.moveState = null;
+    p.clip = null;
+    p.catchT = -1;
     p.moveCooldown = 0;
     p.tackleCooldown = 0;
     p.blockedBy = null; // stale block assignments would carry between plays
@@ -738,7 +822,34 @@ function snap() {
   play.clockRunning = play.off.type !== 'run' && !play.off.qbFree;
 }
 
+// The throw is a keyframed clip, and the ball leaves the hand on its
+// release frame (CLIPS.throw.release), not the instant the button is hit -
+// otherwise the ball flies while the arm is still cocked.
 function throwToReceiver(wr, lob = false) {
+  if (ball.state !== 'held' || play.windup || play.thrown) return;
+  const qb = ball.carrier;
+  if (!qb) return;
+  startClip(qb, 'throw');
+  qb.pose.name = null; // the clip owns the arm now
+  play.windup = { qb, wr, lob, t: 0 };
+}
+
+function stepWindup(dt) {
+  const w = play.windup;
+  if (!w) return;
+  // Sacked, stripped or the play died mid wind-up: no throw.
+  if (phase !== 'live' || ball.carrier !== w.qb || ball.state !== 'held') {
+    play.windup = null;
+    return;
+  }
+  w.t += dt;
+  if (w.t >= CLIPS.throw.release) {
+    play.windup = null;
+    releaseThrow(w.wr, w.lob);
+  }
+}
+
+function releaseThrow(wr, lob = false) {
   if (ball.state !== 'held') return;
   const from = ball.mesh.position.clone();
   from.y = 1.5;
@@ -752,11 +863,10 @@ function throwToReceiver(wr, lob = false) {
   // Accuracy falls off with distance and with pressure in the pocket.
   const qb = ball.carrier;
   const pressure = qb ? THREE.MathUtils.clamp(2.6 - nearestOpponentDist(qb), 0, 2.6) / 2.6 : 0;
-  const err = (dist / 55 + pressure * 0.45) * (lob ? 0.8 : 1);
+  const err = (dist / 55 + pressure * 0.45) * (lob ? 0.8 : 1) * (qb && qb.team !== USER_TEAM ? diff().cpuError : 1);
   target.x += (Math.random() - 0.5) * err * 2.2;
   target.z += (Math.random() - 0.5) * err * 2.6;
 
-  if (qb) playPose(qb.pose, 'throw');
   throwBall(ball, from, target, flightTime, wr);
   play.thrown = true;
   play.clockRunning = false;
@@ -843,7 +953,7 @@ function touchdownFor(team) {
   audio.touchdown();
   fx.shake(0.4);
   showBanner(`TOUCHDOWN ${TEAM_NAMES[team]}!`, `${TD_POINTS} POINTS`);
-  if (team === USER_TEAM) addStyle(STYLE.touchdown);
+  if (team === USER_TEAM) { addStyle(STYLE.touchdown); meta.homeTDs += 1; }
   deadTimer = DEAD_PAUSE + 0.8;
   conversion = { team, points: null };
 }
@@ -924,11 +1034,13 @@ function hop(p, height = 0.5, dur = 0.55) {
   p.hop = { t: 0, dur, height };
 }
 
-function knockDown(p, dir) {
+function knockDown(p, dir, clip = dir < 0 ? 'fallBack' : 'fallForward') {
   p.down = true;
   p.downT = 0;
   p.fallDir = dir;
   p.pose.name = null; // the down pose takes over from whatever was playing
+  p.catchT = -1;
+  startClip(p, clip); // the Blender fall, settling into the down pose
   p.velocity.set(0, 0, 0);
   p.actual.set(0, 0, 0);
 }
@@ -1155,12 +1267,12 @@ function resolveTackle() {
     breaks = true;
     carrier.stam.value = Math.max(
       0,
-      carrier.stam.value - (TACKLE_BREAK_COST * defender.tackleMul) / carrier.powerMul
+      carrier.stam.value - (TACKLE_BREAK_COST * diff().userBreak * defender.tackleMul) / carrier.powerMul
     );
   }
   if (!breaks && !gang && !isUser && carrier.team !== USER_TEAM) {
     // A drag-down from behind is the easiest to run through.
-    breaks = Math.random() < ((type === 'drag' ? 0.34 : 0.24) * carrier.powerMul) / defender.tackleMul;
+    breaks = Math.random() < ((type === 'drag' ? 0.34 : 0.24) * carrier.powerMul * diff().cpuBreak) / defender.tackleMul;
   }
 
   const contact = carrier.group.position.clone().lerp(defender.group.position, 0.5).setY(1.1);
@@ -1188,7 +1300,7 @@ function resolveTackle() {
   // Tackle sticks. Who goes which way depends on the hit.
   const attack = ATTACK_DIR[play.intReturn ?? drive.offense];
   const headOn = type === 'wrap';
-  knockDown(carrier, headOn ? -1 : 1);
+  knockDown(carrier, headOn ? -1 : 1, headOn ? 'fallBack' : type === 'shoestring' ? 'fallShoestring' : 'fallForward');
   knockDown(defender, headOn ? 1 : -1);
   for (const h of helpers) knockDown(h, headOn ? 1 : -1);
 
@@ -1324,6 +1436,23 @@ function trackBall(p) {
   p.velocity.copy(scratch.normalize()).multiplyScalar(d > 1 ? WR_SPEED * 1.12 : WR_SPEED * 0.5);
 }
 
+// COUNTER LEFT's jab step: defenders near the play bite toward the fake side
+// for a beat, the same way they bite on a juke, then have to recover.
+function sellFake(p, wp) {
+  const attack = ATTACK_DIR[p.team];
+  const side = Math.sign(wp.z - p.group.position.z) || Math.sign(wp.z) || 1;
+  let bit = 0;
+  for (const d of players) {
+    if (d.team === p.team || incapacitated(d)) continue;
+    const dist = d.group.position.distanceTo(p.group.position);
+    if (dist > 9) continue;
+    d.commitTarget.set(d.group.position.x - attack * 0.5, 0, d.group.position.z + side * 3.2);
+    d.commitT = 0.5;
+    bit++;
+  }
+  if (bit && p.team === USER_TEAM) ui.hud.toast('THEY BIT ON THE FAKE');
+}
+
 function followRoute(p, speed = WR_SPEED) {
   const route = play.routes.get(p);
   const attack = ATTACK_DIR[p.team];
@@ -1344,7 +1473,10 @@ function followRoute(p, speed = WR_SPEED) {
     return;
   }
   scratch.set(route[0].x - p.group.position.x, 0, route[0].z - p.group.position.z);
-  if (scratch.length() < 0.7 && route.length > 1) route.shift();
+  if (scratch.length() < 0.7 && route.length > 1) {
+    if (route[0].sell) sellFake(p, route[0]);
+    route.shift();
+  }
   p.velocity.copy(scratch.normalize()).multiplyScalar(speed);
 }
 
@@ -1449,7 +1581,7 @@ function updateAIQuarterback(qb) {
   } else {
     qb.velocity.set(0, 0, 0);
   }
-  if (play.thrown || ball.carrier !== qb) return;
+  if (play.thrown || play.windup || ball.carrier !== qb) return;
 
   if (play.t > QB_MIN_HOLD) {
     // Read the field rather than just picking whoever has the most air:
@@ -1739,7 +1871,7 @@ function updateLivePlay(dt) {
 
   // Pass clock: 7-on-7's answer to a pass rush. Crossing the line turns the
   // play into a run, so the clock stops rather than charging a phantom sack.
-  if (play.clockRunning && ball.carrier === qb && !play.thrown) {
+  if (play.clockRunning && ball.carrier === qb && !play.thrown && !play.windup) {
     if (attack * (qb.group.position.x - drive.los) > 0.5) {
       play.clockRunning = false;
       play.qbScrambling = true;
@@ -2117,6 +2249,10 @@ function startDraft(surfaceKey, options) {
 function newGame(surfaceKey, options, homeSquad, awaySquad) {
   applySquads(homeSquad, awaySquad);
   meta.options = options;
+  meta.difficulty = options.difficulty ?? 'normal';
+  meta.homeTDs = 0;
+  paused = false;
+  ui.hidePause();
   meta.clock = GAME_SECONDS;
   meta.over = false;
   score[TEAM.HOME] = 0;
@@ -2130,7 +2266,7 @@ function newGame(surfaceKey, options, homeSquad, awaySquad) {
   if (!world || world.surface.key !== surfaceKey) setSurface(surfaceKey);
   ui.showGame();
   ui.hud.setKeys(
-    'ARROWS move · SHIFT turbo · SPACE snap · A S D F G throw (hold = lob) · Z spin · X juke · C truck · E dive/pick · Q switch · V gamebreaker'
+    'ARROWS move · SHIFT turbo · SPACE snap · A S D F G throw (SHIFT + letter = lob) · Z spin · X juke · C truck · E catch (hold = high point) / pick · Q switch · V gamebreaker · ESC pause'
   );
   startDrive(TEAM.HOME, -ATTACK_DIR[TEAM.HOME] * (FIELD.halfLength - START_FROM_OWN));
   toPlayCall();
@@ -2148,14 +2284,33 @@ ui.handlers.onRestart = () => {
 };
 ui.handlers.onSurfacePreview = (key) => {
   if (phase === 'menu' || phase === 'loading') setSurface(key);
+  savePrefs({ surface: key });
 };
 // The draft camera just orbits the empty lot behind the board.
 ui.handlers.onToggle = (key, value) => {
   if (key === 'sound') audio.setMuted(!value);
   if (key === 'pickups') powerups.setEnabled?.(value);
+  savePrefs({ [key]: value });
+};
+ui.handlers.onResume = () => { if (paused) togglePause(); };
+ui.handlers.onPauseSound = () => toggleSound();
+ui.handlers.onQuit = () => {
+  paused = false;
+  document.body.classList.remove('sf-paused');
+  ui.hidePause();
+  conversion = null;
+  convPrompt?.close();
+  ui.hud.hideBanner();
+  ui.showTitle();
+  phase = 'menu';
+  touch.setMode('menu');
 };
 
-setSurface('concrete');
+// Saved record and last-used menu choices (record.js).
+const saved = loadRecord();
+ui.setPrefs(saved.prefs);
+ui.setRecord(recordLine(saved));
+setSurface(ui.surface);
 loadPlayerAssets().then((loaded) => {
   assets = loaded;
   buildTeams();
@@ -2169,6 +2324,7 @@ loadPlayerAssets().then((loaded) => {
     THREE, // debug handle: lets a harness build vectors in page context
     anim: { applyPose, stepPose, playPose }, // pose preview harness
     catch: { CATCH_CLIP, CATCH_BONES, sampleCatch, catchWeight }, // clip harness
+    clips: { CLIPS, startClip }, // Blender clip harness (throw, spin, juke, truck, falls)
     players, ball, drive, score, meta, play, style, powerups, renderer, scene, camera,
     snap, newGame, step,
     get phase() { return phase; },
@@ -2209,6 +2365,10 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => step(Math.min(clock.getDelta(), 0.05)));
 
 function step(dt) {
+  if (paused) {
+    composer.render();
+    return;
+  }
   if (phase === 'loading') {
     composer.render();
     return;
@@ -2227,6 +2387,7 @@ function step(dt) {
     if (!userOnOffense() && lineupTimer > AI_SNAP_DELAY) snap();
   } else if (phase === 'live') {
     updateLivePlay(dt);
+    stepWindup(dt);
   } else if (phase === 'dead') {
     deadTimer -= dt;
     for (const p of players) p.velocity.set(0, 0, 0);
@@ -2292,6 +2453,7 @@ function step(dt) {
       p.actual.copy(p.velocity);
     } else {
       if (p.speedMul !== 1) desiredVel.multiplyScalar(p.speedMul);
+      if (p.team !== USER_TEAM) desiredVel.multiplyScalar(diff().cpuSpeed);
       const dsq = desiredVel.lengthSq();
       const vsq = p.velocity.lengthSq();
       let rate = (dsq >= vsq ? ACCEL : DECEL) * p.accelMul;
@@ -2388,13 +2550,15 @@ function step(dt) {
     // standing player used to be a runner mid-step; idle/brace solve over it.
     const poseOut = p.catchT >= 0 ? null : stepPose(p.pose, dt, {
       wantIdle: p.down || (speed < 0.45 && p.stunT <= 0),
-      idleName: p.down ? 'down' : phase === 'lineup' ? 'brace' : 'idle',
+      idleName: p.down ? (p.fallDir < 0 ? 'downBack' : 'down') : phase === 'lineup' ? 'brace' : 'idle',
       clock: clock.elapsedTime + p.poseOffset,
     });
     if (poseOut) {
       p.rig.getWorldQuaternion(rigQuat);
       applyPose(p.poseRefs, poseOut.map, rigQuat, poseOut.weight);
     }
+    // Blender clips go on last, so their fade-out lands on the pose above.
+    stepClip(p, dt);
 
     if (ball.state === 'thrown' && ball.intended === p) {
       const d = ball.mesh.position.distanceTo(p.group.position);
@@ -2501,6 +2665,8 @@ function step(dt) {
 
 // ---- Conversions + game over ---------------------------------------------
 
+let convPrompt = null; // the open extra-point prompt, so quitting can close it
+
 function askConversion() {
   phase = 'convert';
   // Never leave the game sitting on a prompt: the try clock runs down and
@@ -2510,18 +2676,25 @@ function askConversion() {
     ui.hud.banner('EXTRA POINT?', `1 FROM THE 5  ·  2 FROM THE 10  ·  ${Math.ceil(left)}s`);
   paint();
   const countdown = setInterval(() => {
+    if (paused) return; // the try clock stops while the game is paused
     left -= 1;
     if (left <= 0) pick(1);
     else paint();
   }, 1000);
-  const pick = (points) => {
+  const close = () => {
     clearInterval(countdown);
     ui.hud.hideBanner();
     window.removeEventListener('keydown', onKey);
     touchPick.forEach((fn) => fn());
+    convPrompt = null;
+  };
+  const pick = (points) => {
+    close();
     startConversion(points);
   };
+  convPrompt = { close };
   const onKey = (e) => {
+    if (paused) return;
     if (e.key === '1') pick(1);
     if (e.key === '2') pick(2);
   };
@@ -2530,6 +2703,7 @@ function askConversion() {
   const touchPick = [];
   const makeBtn = (label, points, left) => {
     const b = document.createElement('div');
+    b.className = 'conv-btn'; // hidden while paused (see ui.js)
     b.textContent = label;
     b.style.cssText = `position:fixed;z-index:50;top:52%;${left ? 'left:28%' : 'left:62%'};
       transform:translateX(-50%);padding:14px 26px;border-radius:999px;background:#b9f227;color:#10130f;
@@ -2551,8 +2725,14 @@ function endGame() {
   touch.setMode('menu');
   const h = score[TEAM.HOME];
   const a = score[TEAM.AWAY];
+  const { record, notes } = recordGame({
+    home: h, away: a, touchdowns: meta.homeTDs, difficulty: meta.difficulty,
+  });
+  ui.setRecord(recordLine(record));
   ui.showResult(
     `${h} — ${a}`,
-    h > a ? 'YOU TOOK THE BLOCK.' : h < a ? 'THEY RAN YOU OFF THE LOT.' : 'DEAD EVEN. RUN IT BACK.'
+    h > a ? 'YOU TOOK THE BLOCK.' : h < a ? 'THEY RAN YOU OFF THE LOT.' : 'DEAD EVEN. RUN IT BACK.',
+    notes,
+    `${recordLine(record)} · ${meta.difficulty.toUpperCase()}`
   );
 }

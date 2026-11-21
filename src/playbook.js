@@ -379,7 +379,20 @@ export function routeWaypoints(routeName, start, attack) {
 export function runWaypoints(assign, start, los, attack) {
   const dir = assign.dir ?? 0;
   const lane = dir * 9;
+  const path = [];
+  // Misdirection: a hard jab step the wrong way first. The waypoint carries
+  // sell: true so the defense bites on it (main.js followRoute).
+  if (assign.fake) {
+    // Short enough to land before the handoff, so the jab happens even when
+    // you take the ball and steer him yourself.
+    path.push({
+      x: start.x + attack * 1.6,
+      z: start.z - dir * 2.2 * attack,
+      sell: true,
+    });
+  }
   return [
+    ...path,
     { x: los - attack * (assign.depth ?? 0), z: start.z + lane * 0.5 * attack },
     { x: los + attack * 4, z: start.z + lane * attack },
     { x: los + attack * 14, z: (start.z + lane * attack) * 0.6 },
@@ -460,6 +473,11 @@ export function drawPlayDiagram(canvas, play, teamColor = '#7ee081') {
       const p1 = P(-(a.depth ?? 0), z + dir * 4.5);
       const p2 = P(4, z + dir * 9);
       const p3 = P(16, (z + dir * 9) * 0.6);
+      if (a.fake) {
+        // The jab step the wrong way, drawn as a hook so the card shows the fake.
+        const pf = P(-(a.depth ?? 0) - 0.6, z - dir * 3.2);
+        g.lineTo(pf[0], pf[1]);
+      }
       g.lineTo(p1[0], p1[1]);
       g.lineTo(p2[0], p2[1]);
       g.lineTo(p3[0], p3[1]);

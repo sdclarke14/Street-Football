@@ -186,6 +186,12 @@ const CSS = `
 #ui-result .rec { margin-top: 10px; font-size: clamp(10px,1.6vw,12px); opacity: 0.6; letter-spacing: 1.5px; }
 #ui .rec { font-size: clamp(10px,1.5vw,12px); font-weight: 800; letter-spacing: 1.5px; color: #ffd54a; margin-top: 8px; }
 #ui .toggle.diff { background: rgba(0,0,0,0.45); border-color: #ffd54a; color: #ffd54a; min-width: 78px; text-align: center; }
+/* ---- Big screens ----
+   Everything is sized for a phone in landscape. On a desktop monitor that
+   left the play-call board and draft as a small strip in a big empty screen,
+   so the whole UI layer is zoomed by --uiz (set from the window size in
+   createUI; 1 on phones). */
+#ui > .screen, #ui > #ui-hud { zoom: var(--uiz, 1); }
 /* ---- Pause ---- */
 body.sf-paused .conv-btn { display: none !important; }
 #ui-pause { background: rgba(10,14,12,0.80); align-items: center; justify-content: center; text-align: center; z-index: 5; }
@@ -297,6 +303,15 @@ export function createUI({ surfaces, art }) {
   `;
   document.body.appendChild(root);
   const $ = (id) => root.querySelector('#' + id);
+
+  // Scale the UI up on big screens (see the CSS note). Never below 1, so
+  // phones are untouched; capped so a 4K monitor doesn't get billboard text.
+  const fitUI = () => {
+    const z = Math.max(1, Math.min(window.innerWidth / 1100, window.innerHeight / 600, 2));
+    root.style.setProperty('--uiz', z.toFixed(3));
+  };
+  fitUI();
+  window.addEventListener('resize', fitUI);
 
   // ---- Title ----
   let selectedSurface = 'concrete';

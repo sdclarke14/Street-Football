@@ -16,6 +16,7 @@ import { toonify, addOutlines, RAMPS } from './toon.js';
 import { applyPose, stepPose, playPose } from './anim.js';
 import { CLIPS, startClip, makeClipPlayer } from './clipPlayer.js';
 import { loadRecord, savePrefs, recordGame, recordLine } from './record.js';
+import { portal } from './portal.js';
 import {
   CATCH_CLIP,
   CATCH_BONES,
@@ -276,6 +277,27 @@ const DIFFICULTY = {
 };
 const diff = () => DIFFICULTY[meta.difficulty] ?? DIFFICULTY.normal;
 let paused = false;
+// A portal ad is on screen (portal.js): audio muted, input ignored, sim frozen.
+let adPlaying = false;
+let portalMuted = false; // CrazyGames' site-wide mute setting
+let soundBeforeAd = null;
+const adHooks = {
+  mute(on) {
+    if (on) {
+      if (soundBeforeAd === null) soundBeforeAd = !audio.muted;
+      audio.setMuted(true);
+    } else if (soundBeforeAd !== null) {
+      audio.setMuted(portalMuted || !soundBeforeAd);
+      soundBeforeAd = null;
+    }
+  },
+  block(on) {
+    adPlaying = on;
+    if (on) { keys.clear(); eDownAt = null; }
+    else clock.getDelta(); // don't bank the ad as one giant frame
+  },
+};
+const portalReady = portal.init();
 let deadTimer = 0;
 let lineupTimer = 0;
 let hitStopT = 0;
@@ -329,6 +351,7 @@ window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (!audio.started) audio.start();
   if (k === ' ') e.preventDefault();
+  if (adPlaying) return; // portals require input to be ignored during ads
   if (keys.has(k)) return;
   keys.add(k);
   if (k === 'escape' || k === 'p') { togglePause(); return; }
@@ -394,6 +417,10 @@ function togglePause() {
 }
 
 function toggleSound() {
+  if (portalMuted) {
+    ui.hud.toast('SOUND IS OFF ON THIS SITE'); // the portal's mute setting wins
+    return;
+  }
   audio.setMuted(!audio.muted);
   ui.hud.toast(audio.muted ? 'SOUND OFF' : 'SOUND ON');
   if (paused) {
@@ -452,6 +479,18 @@ function startCatchClip(p) {
   p.pose.weight = 0;
 }
 
+// High-point / jump-ball catch: the Blender jumpCatch clip plus a real hop.
+// Until the ball arrives the arms still aim at it (see the reach at the end
+// of the player update), so the reach matches the ball's actual height.
+// Already in the air (tapped early, then the catch resolves)? Don't restart.
+function goUpForIt(p, height) {
+  if (p.clip?.name === 'jumpCatch') return;
+  p.catchT = -1;
+  startClip(p, 'jumpCatch');
+  p.pose.name = null;
+  hop(p, height);
+}
+
 function userCatch(aggressive) {
   const cw = play.catch;
   if (!cw || cw.tapAt !== null || cw.wr !== controlled) return;
@@ -459,9 +498,8 @@ function userCatch(aggressive) {
   const covered = nearestOpponentDist(cw.wr) < 3;
   cw.type = aggressive ? 'aggressive' : covered ? 'possession' : 'rac';
   cw.wr.diveT = 0.35;
-  if (aggressive) playPose(cw.wr.pose, 'jumpCatch');
+  if (aggressive) goUpForIt(cw.wr, 0.55);
   else startCatchClip(cw.wr);
-  if (aggressive) hop(cw.wr, 0.55);
   audio.uiTap();
 }
 
@@ -629,6 +667,15 @@ function spotBall(spotX) {
 // ---- Play lifecycle -------------------------------------------------------
 
 function toPlayCall() {
+  // After a score, portal builds take a natural break before the next drive.
+  if (meta.adDue) {
+    meta.adDue = false;
+    if (portal.isPortal) {
+      phase = 'adbreak'; // holds the dead-ball timer until the break is over
+      portal.adBreak(adHooks).then(() => toPlayCall());
+      return;
+    }
+  }
   phase = 'playcall';
   touch.setMode('menu');
   const side = userOnOffense() ? 'offense' : 'defense';
@@ -954,6 +1001,7 @@ function touchdownFor(team) {
   fx.shake(0.4);
   showBanner(`TOUCHDOWN ${TEAM_NAMES[team]}!`, `${TD_POINTS} POINTS`);
   if (team === USER_TEAM) { addStyle(STYLE.touchdown); meta.homeTDs += 1; }
+  meta.adDue = true;
   deadTimer = DEAD_PAUSE + 0.8;
   conversion = { team, points: null };
 }
@@ -1171,8 +1219,12 @@ function resolveCatch(wr) {
   const pCatch = Math.min(1 - pInt, (wrScore / total) * (type === 'aggressive' ? 1.08 : 1));
 
   const roll = Math.random();
-  playPose(db.pose, db.playingBall ? 'jumpCatch' : 'deflect');
-  hop(db, db.playingBall ? 0.45 : 0.3);
+  if (db.playingBall) goUpForIt(db, 0.45);
+  else {
+    startClip(db, 'deflect'); // Blender swat: up, chop through the ball, land ready
+    db.pose.name = null;
+    hop(db, 0.3);
+  }
 
   if (roll < pInt) {
     interceptBall(db);
@@ -1195,9 +1247,8 @@ function resolveCatch(wr) {
 function completeCatch(wr, type, timing, contested = false) {
   holdBall(ball, wr);
   ball.tipped = false;
-  if (type === 'aggressive') playPose(wr.pose, 'jumpCatch');
+  if (type === 'aggressive') goUpForIt(wr, 0.55);
   else startCatchClip(wr);
-  if (type === 'aggressive') hop(wr, 0.55);
   // Run-after-catch keeps the momentum he had; the others cost a beat.
   if (type !== 'rac') wr.actual.multiplyScalar(type === 'possession' ? 0.45 : 0.7);
   audio.catchBall();
@@ -2251,6 +2302,7 @@ function newGame(surfaceKey, options, homeSquad, awaySquad) {
   meta.options = options;
   meta.difficulty = options.difficulty ?? 'normal';
   meta.homeTDs = 0;
+  meta.adDue = false;
   paused = false;
   ui.hidePause();
   meta.clock = GAME_SECONDS;
@@ -2260,7 +2312,7 @@ function newGame(surfaceKey, options, homeSquad, awaySquad) {
   style.value = 0;
   style.active = 0;
   conversion = null;
-  audio.setMuted(!options.sound);
+  audio.setMuted(portalMuted || !options.sound);
   if (options.sound) audio.start();
   powerups.setEnabled?.(options.pickups);
   if (!world || world.surface.key !== surfaceKey) setSurface(surfaceKey);
@@ -2275,7 +2327,9 @@ function newGame(surfaceKey, options, homeSquad, awaySquad) {
 ui.handlers.onStart = (surfaceKey, options) => {
   audio.start();
   audio.uiTap();
-  startDraft(surfaceKey, options);
+  // Portal builds: a natural break before a new game (the portal decides
+  // whether an ad actually shows). No-op on GitHub Pages and itch.io.
+  portal.adBreak(adHooks).then(() => startDraft(surfaceKey, options));
 };
 ui.handlers.onRestart = () => {
   ui.showTitle();
@@ -2320,6 +2374,16 @@ loadPlayerAssets().then((loaded) => {
   const boot = document.querySelector('#boot');
   boot?.classList.add('gone');
   setTimeout(() => boot?.remove(), 500);
+  portalReady.then(() => {
+    portal.loadingDone();
+    portal.onMuteSetting((muted) => {
+      portalMuted = muted;
+      audio.setMuted(muted || !(meta.options?.sound ?? ui.options.sound));
+    });
+  });
+  // Debug handle for the test harnesses. Left out of portal builds, which
+  // must ship without debug code (Poki rule).
+  if (portal.isPortal) return;
   window.__game = {
     THREE, // debug handle: lets a harness build vectors in page context
     anim: { applyPose, stepPose, playPose }, // pose preview harness
@@ -2365,7 +2429,9 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => step(Math.min(clock.getDelta(), 0.05)));
 
 function step(dt) {
-  if (paused) {
+  // Tell the portal when real play is on screen (edge-triggered in portal.js).
+  portal.setGameplay(!paused && !adPlaying && inGame());
+  if (paused || adPlaying) {
     composer.render();
     return;
   }

@@ -85,6 +85,8 @@ retargeting:
 | jukeLeft / jukeRight | full body | plant and push off, mirrored |
 | truck | upper body | shoulder down, off forearm driven forward |
 | fallForward / fallBack / fallShoestring | full body | one per tackle type, ending in the down pose |
+| jumpCatch | full body | high-point catch for receivers and defenders; the arms still track the real ball until it arrives |
+| deflect | full body | defender swats the ball: up, chop through it, land ready |
 
 `tools/anim/author_clips.py` builds them: it imports the rig with Blender's
 Python module (`pip install bpy`), turns each key pose into bone rotations,
@@ -100,6 +102,24 @@ keeps any bones a clip doesn't list.
 run clips in one file, packed by `python3 tools/pack_hero.py` from the three
 source GLBs in `assets-src/models/` (about 21 MB, not deployed). Each source was
 6.7 MB of the same PNG texture; the pack keeps one copy as a JPEG.
+
+## Game portals (CrazyGames, Poki, itch.io)
+
+```bash
+python3 tools/package_portals.py   # -> portal-builds/street-football-{crazygames,poki,itch}.zip
+```
+
+`src/portal.js` wraps the CrazyGames SDK v3 and the Poki SDK v2 behind one
+small API, picked at build time with `VITE_PORTAL` (`vite.config.js` adds the
+SDK `<script>` to `<head>`). The plain build and itch.io get a no-op adapter:
+no SDK, no ads. Portal builds report gameplay start and stop, take an ad break
+(the portal decides whether an ad shows) before a new game and after a
+touchdown, mute audio and ignore input during an ad, honour the CrazyGames
+site mute setting, stop arrows, space and the wheel from scrolling the host
+page, and ship without the `window.__game` debug handle. The **Portal builds**
+GitHub Action builds the three zips on every push to main.
+`portal-kit/` has the listing text, covers, screenshots and step-by-step
+submission notes.
 
 ## Fields
 

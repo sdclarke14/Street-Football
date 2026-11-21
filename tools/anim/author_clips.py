@@ -309,6 +309,82 @@ SHOE_TWIST = P(
     hips={'pitch': 8, 'roll': 16, 'drop': 13},
 )
 
+# JUMP CATCH - the high-point / jump-ball catch, for receivers and for
+# defenders going up for it. The game also hops the body and, until the ball
+# arrives, still aims the arms at the real ball, so the clip carries the
+# athlete (drive knee, reach, pull it in, land soft) and the reach keys off
+# the ball's height.
+JUMP_TAKEOFF = P(
+    lArm=(0.30, 0.55, 0.78), lFore=(0.20, 0.80, 0.56),
+    rArm=(-0.30, 0.55, 0.78), rFore=(-0.20, 0.80, 0.56),
+    chest=(0, 0.97, 0.22), spineMid=(0, 0.98, 0.18), head=(0, 0.95, 0.30),
+    lUpLeg=(0.12, -0.55, 0.83), lLeg=(0.08, -0.98, 0.15), lFoot=(0, -0.3, 1),
+    rUpLeg=(-0.10, -0.98, -0.20), rLeg=(-0.06, -0.96, -0.28), rFoot=(0, -0.8, 0.6),
+    hips={'pitch': -2},
+)
+JUMP_REACH = P(
+    lArm=(0.22, 0.92, 0.32), lFore=(0.12, 0.97, 0.20),
+    rArm=(-0.22, 0.92, 0.32), rFore=(-0.12, 0.97, 0.20),
+    chest=(0, 0.98, -0.05), spineMid=(0, 0.99, -0.04), head=(0, 0.92, 0.38),
+    lUpLeg=(0.12, -0.62, 0.77), lLeg=(0.08, -0.97, 0.22), lFoot=(0, -0.4, 1),
+    rUpLeg=(-0.12, -0.92, 0.38), rLeg=(-0.08, -0.85, -0.52), rFoot=(0, -0.8, 0.6),
+    hips={'pitch': -4},
+)
+JUMP_CONTACT = P(
+    lArm=(0.18, 0.95, 0.25), lFore=(0.06, 0.99, 0.10),
+    rArm=(-0.18, 0.95, 0.25), rFore=(-0.06, 0.99, 0.10),
+    chest=(0, 0.99, -0.08), spineMid=(0, 0.99, -0.06), head=(0, 0.90, 0.43),
+    lUpLeg=(0.14, -0.70, 0.70), lLeg=(0.08, -0.92, -0.38),
+    rUpLeg=(-0.14, -0.78, 0.61), rLeg=(-0.08, -0.88, -0.47),
+    hips={'pitch': -3},
+)
+JUMP_PULL = P(
+    lArm=(0.34, -0.40, 0.85), lFore=(0.05, 0.10, 0.99),
+    rArm=(-0.34, -0.40, 0.85), rFore=(-0.05, 0.10, 0.99),
+    chest=(0, 0.93, 0.36), spineMid=(0, 0.95, 0.30), head=(0, 0.92, 0.40),
+    lUpLeg=(0.12, -0.92, 0.38), lLeg=(0.08, -0.99, -0.10),
+    rUpLeg=(-0.12, -0.94, 0.33), rLeg=(-0.08, -0.99, -0.06),
+)
+JUMP_LAND = P(
+    lArm=(0.30, -0.70, 0.65), lFore=(0.10, -0.10, 0.99),
+    rArm=(-0.26, -0.82, 0.51), rFore=(0.30, -0.10, 0.95),
+    chest=(0, 0.88, 0.47), spineMid=(0, 0.91, 0.41), head=(0, 0.95, 0.30),
+    lUpLeg=(0.14, -0.72, 0.68), lLeg=(0.08, -0.88, -0.47), lFoot=(0, -0.1, 1),
+    rUpLeg=(-0.14, -0.74, 0.66), rLeg=(-0.08, -0.88, -0.46), rFoot=(0, -0.1, 1),
+    hips={'pitch': 10, 'drop': 16},
+)
+
+# DEFLECT - a defender swatting the ball away rather than catching it: right
+# hand goes up, chops down through the ball, small hop, lands ready.
+READY = P(
+    lArm=(0.30, -0.80, 0.52), lFore=(0.15, -0.30, 0.94),
+    rArm=(-0.30, -0.80, 0.52), rFore=(-0.15, -0.30, 0.94),
+    chest=(0, 0.93, 0.36), spineMid=(0, 0.95, 0.30),
+    lUpLeg=(0.14, -0.90, 0.40), lLeg=(0.10, -0.95, -0.28),
+    rUpLeg=(-0.14, -0.90, 0.40), rLeg=(-0.10, -0.95, -0.28),
+    hips={'pitch': 6, 'drop': 9},
+)
+SWAT_LOAD = dict(READY, rArm=(-0.45, -0.70, 0.55), rFore=(-0.30, 0.20, 0.93),
+                 head=(0, 0.90, 0.44))
+SWAT_UP = P(
+    rArm=(-0.20, 0.95, 0.24), rFore=(-0.10, 0.99, 0.08),
+    lArm=(0.70, -0.30, 0.65), lFore=(0.50, 0.10, 0.86),
+    chest=(-0.05, 0.98, 0.10), spineMid=(0, 0.99, 0.08), head=(0, 0.88, 0.47),
+    lUpLeg=(0.12, -0.80, 0.59), lLeg=(0.08, -0.97, 0.20),
+    rUpLeg=(-0.12, -0.98, -0.15), rLeg=(-0.08, -0.95, -0.30),
+    hips={'pitch': -2, 'yaw': 10},
+)
+SWAT_CHOP = P(
+    rArm=(0.10, 0.20, 0.97), rFore=(0.30, -0.55, 0.78),
+    lArm=(0.65, -0.55, 0.52), lFore=(0.45, -0.20, 0.87),
+    chest=(0.05, 0.90, 0.43), spineMid=(0.03, 0.93, 0.36), head=(0, 0.88, 0.47),
+    lUpLeg=(0.12, -0.88, 0.46), lLeg=(0.08, -0.96, -0.20),
+    rUpLeg=(-0.12, -0.92, 0.37), rLeg=(-0.08, -0.97, -0.18),
+    hips={'pitch': 4, 'yaw': -8},
+)
+SWAT_LAND = dict(READY, _hips={'pitch': 8, 'drop': 14})
+CARRY_P = P()
+
 # (name, bone set, [(frame, pose)], extra metadata). Frame 0 is the first.
 CLIPS = [
     ('throw', UPPER, [(0, THROW_SET), (4, THROW_COCK), (5, THROW_RELEASE),
@@ -331,6 +407,12 @@ CLIPS = [
     ('fallShoestring', FULL, [(0, SHOE_TRIP), (8, SHOE_TWIST), (17, FWD_IMPACT),
                               (26, DOWN_END)],
      {'fadeIn': 0.06, 'fadeOut': 0.25, 'holdsEnd': True}),
+    ('jumpCatch', FULL, [(0, JUMP_TAKEOFF), (5, JUMP_REACH), (9, JUMP_CONTACT),
+                         (14, JUMP_PULL), (17, JUMP_LAND), (25, CARRY_P)],
+     {'fadeIn': 0.04, 'fadeOut': 0.18}),
+    ('deflect', FULL, [(0, SWAT_LOAD), (4, SWAT_UP), (7, SWAT_CHOP), (12, SWAT_LAND),
+                       (18, READY)],
+     {'fadeIn': 0.04, 'fadeOut': 0.18}),
 ]
 
 

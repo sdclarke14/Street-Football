@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:crazygames": "VITE_PORTAL=crazygames vite build --outDir build/crazygames --emptyOutDir",
+    "build:poki": "VITE_PORTAL=poki vite build --outDir build/poki --emptyOutDir",
+    "build:itch": "VITE_PORTAL=itch vite build --outDir build/itch --emptyOutDir",
+    "portals": "python3 tools/package_portals.py"
   },
   "dependencies": {
     "three": "^0.178.0"
